@@ -30,6 +30,12 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+# 临时 .bat 以系统 OEM 代码页写入（与 cmd 默认代码页一致），中文路径也能传进去；
+# 若仓库路径含非 ASCII 字符且控制台改过代码页（如 chcp 65001），仍可能乱码。
+if ($repoRoot -match '[^\x00-\x7F]') {
+    Write-Host "提示: 仓库路径含非 ASCII 字符，若构建报路径错误请移到纯英文路径。" -ForegroundColor Yellow
+}
+
 function Fail([string]$message) {
     Write-Host "错误: $message" -ForegroundColor Red
     exit 1
@@ -40,7 +46,7 @@ function Info([string]$message) {
 }
 
 # ---- 工具检查 ----
-foreach ($tool in @("cmake", "ninja", "python")) {
+foreach ($tool in @("cmake", "ctest", "ninja", "python")) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         Fail "找不到 $tool，请先安装并加入 PATH。"
     }
@@ -89,12 +95,14 @@ $lines = @(
     "set `"VSLANG=1033`"",
     "cmake -S `"$repoRoot`" -B `"$BuildDir`" -G Ninja -DCMAKE_BUILD_TYPE=$Configuration -DVOILUT_PORTABLE=ON -DVOILUT_EMBED_SHADERS=ON -DCMAKE_TOOLCHAIN_FILE=`"$toolchain`" -DVCPKG_TARGET_TRIPLET=$Triplet -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
     "if errorlevel 1 exit /b 1",
-    "cmake --build `"$BuildDir`" --target windower --parallel",
+    "cmake --build `"$BuildDir`" --target windower window_model_test --parallel",
+    "if errorlevel 1 exit /b 1",
+    "ctest --test-dir `"$BuildDir`" -C $Configuration --output-on-failure",
     "if errorlevel 1 exit /b 1"
 )
-Set-Content -Path $tempBat -Value $lines -Encoding ascii
+Set-Content -Path $tempBat -Value $lines -Encoding Oem
 try {
-    Info "配置并编译..."
+    Info "配置、编译并运行单元测试..."
     & cmd.exe /c "`"$tempBat`""
     if ($LASTEXITCODE -ne 0) {
         Fail "编译失败。"
