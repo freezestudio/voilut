@@ -70,6 +70,29 @@ namespace
         return {};
     }
 
+    /// @brief 读取环境变量。
+    /// @details MSVC 把 `std::getenv` 标记为不安全（C4996），这里用 `_dupenv_s`
+    ///          获取副本；其它平台仍用标准 `std::getenv`。
+    /// @param name 环境变量名。
+    /// @return 变量值；未设置时返回空字符串。
+    std::string environment_value(const char *name)
+    {
+#if defined(_MSC_VER)
+        char *value = nullptr;
+        size_t size = 0;
+        if (_dupenv_s(&value, &size, name) != 0 || value == nullptr)
+        {
+            return {};
+        }
+        std::string result(value);
+        std::free(value);
+        return result;
+#else
+        const char *value = std::getenv(name);
+        return value != nullptr ? std::string(value) : std::string{};
+#endif
+    }
+
     /// @brief 按候选路径读入整个着色器文件。
     /// @param fileName 文件名（如 `"image.wgsl"`）。
     /// @param preferred_dir 优先尝试的目录（环境变量覆盖；为空时跳过）。
@@ -121,8 +144,8 @@ namespace voilut
     {
 #if defined(VOILUT_EMBED_SHADERS)
         // 嵌入模式：优先用环境变量指向的目录（开发期改 WGSL 免重编译）。
-        if (const char *override_dir = std::getenv("VOILUT_SHADERS_DIR");
-            override_dir != nullptr && override_dir[0] != '\0')
+        const std::string override_dir = environment_value("VOILUT_SHADERS_DIR");
+        if (!override_dir.empty())
         {
             return read_from_disk(fileName, std::filesystem::path(override_dir));
         }

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstring> // std::memcpy
+#include <filesystem>
 #include <format>
 #include <memory>
 #include <string>
@@ -19,17 +20,32 @@ namespace voilut
         /// @brief TIFF 句柄的 RAII 包装（退出时自动 TIFFClose）。
         using TiffHandle = std::unique_ptr<TIFF, decltype(&TIFFClose)>;
 
-        /// @brief 取路径中的文件名部分（不引入 <filesystem>，避免编译开销）。
+        /// @brief 取路径中的文件名部分。
         std::string file_name_of(const std::string &path)
         {
             const size_t slash = path.find_last_of("/\\");
             return slash == std::string::npos ? path : path.substr(slash + 1);
         }
+
+        /// @brief 打开 TIFF：项目内部路径统一为 UTF-8。
+        /// @details libtiff 的 `TIFFOpen` 在 Windows 上按 ANSI 代码页解释路径，
+        ///          中文文件名会打不开；这里转成宽路径调用 `TIFFOpenW`。
+        /// @param path UTF-8 路径。
+        /// @return TIFF 句柄，失败时为 nullptr。
+        TIFF *open_tiff(const std::string &path)
+        {
+#if defined(_WIN32)
+            const std::filesystem::path wide_path(std::u8string(path.begin(), path.end()));
+            return TIFFOpenW(wide_path.c_str(), "r");
+#else
+            return TIFFOpen(path.c_str(), "r");
+#endif
+        }
     } // namespace
 
     std::expected<DecodedImage, std::string> decode_tiff(const std::string &path)
     {
-        TiffHandle tif(TIFFOpen(path.c_str(), "r"), &TIFFClose);
+        TiffHandle tif(open_tiff(path), &TIFFClose);
         if (!tif)
         {
             return std::unexpected(std::format("无法打开 TIFF 文件：{}", path));

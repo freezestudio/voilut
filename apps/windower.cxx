@@ -33,6 +33,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+// 先包含 <windows.h>，避免 GLFW 先行定义 APIENTRY 后与 Windows SDK 冲突（C4005）。
+#include <windows.h>
+#include <shobjidl.h> // IFileOpenDialog（目录选择）
 #endif
 
 #include <algorithm>
@@ -56,11 +59,6 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_wgpu.h>
-
-#if defined(_WIN32)
-#include <windows.h>
-#include <shobjidl.h> // IFileOpenDialog（目录选择）
-#endif
 
 #include "context.h"
 #include "decode/image_decode.h"
@@ -866,9 +864,9 @@ namespace
         if (state->wl_dragging)
         {
             // 从拖动起点的窗按总位移换算：不会累积，松开后再次拖动不会跳变。
-            voilut::WindowSetting window = state->wl_base;
+            voilut::WindowSetting dragged = state->wl_base;
             state->window_setting =
-                voilut::drag_window(window, x - state->wl_start_x, y - state->wl_start_y);
+                voilut::drag_window(dragged, x - state->wl_start_x, y - state->wl_start_y);
             state->roi_windowed = false;
             apply_window(state);
         }
@@ -1654,7 +1652,13 @@ namespace
 int main(int argc, char **argv)
 {
     // 日志行缓冲：stdout 重定向到文件时也能及时看到「已加载 …」等提示。
-    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    // 注意：MSVC 的 setvbuf 要求 size > 0（即使 buffer 为 nullptr），传 0 会
+    // 触发 invalid parameter 并直接终止进程；glibc 则接受 0。
+    std::setvbuf(stdout, nullptr, _IOLBF, 4096);
+#if defined(_WIN32)
+    // 源码与 std::println 输出均为 UTF-8；控制台默认代码页（GBK）会把中文显示成乱码。
+    ::SetConsoleOutputCP(CP_UTF8);
+#endif
 
     const std::vector<std::string> args(argv + 1, argv + argc);
     std::vector<std::string> playlist = build_playlist(args);

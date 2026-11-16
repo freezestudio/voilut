@@ -63,7 +63,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # 警告只加给本项目目标；不要用全局 add_compile_options（会污染 Dawn 子模块）。
 if(MSVC)
-  set(PROJECT_WARNINGS /W4 /permissive-)
+  # /utf-8：源码与执行字符集统一为 UTF-8。MSVC 在中文区域默认按 GBK（代码页 936）
+  # 读取无 BOM 的 UTF-8 源码，会把中文注释 / 字符串误解析成语法错误。
+  set(PROJECT_WARNINGS /W4 /permissive- /utf-8)
 else()
   set(PROJECT_WARNINGS -Wall -Wextra -Wpedantic)
 endif()
@@ -205,6 +207,20 @@ if(NOT EXISTS "${DAWN_DIR}/CMakeLists.txt")
       "  Linux/macOS : bash scripts/install_dawn.sh\n"
       "  Windows     : powershell -ExecutionPolicy Bypass -File scripts\\install_dawn.ps1")
   endif()
+endif()
+
+# ------------------------------------------------------------
+# Dawn 内嵌 abseil 的 CRT 选择（单文件发行）
+# ------------------------------------------------------------
+# abseil 的 CMakeLists 会用 ABSL_MSVC_STATIC_RUNTIME 覆盖 CMAKE_MSVC_RUNTIME_LIBRARY。
+# 它默认 OFF（/MD），与 VOILUT_PORTABLE 的 /MT 链接会报 LNK2038
+# （RuntimeLibrary 不匹配），因此便携构建时必须改为静态 CRT。
+if(VOILUT_PORTABLE AND WIN32)
+  set(ABSL_MSVC_STATIC_RUNTIME ON CACHE BOOL "abseil 使用静态 CRT（VOILUT_PORTABLE）" FORCE)
+  # 单文件发行不随附 d3dcompiler_47.dll，让 Dawn 从 System32 加载。
+  # Dawn 默认对裸文件名使用 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR，会返回 ERROR_INVALID_PARAMETER。
+  set(DAWN_FORCE_SYSTEM_COMPONENT_LOAD ON CACHE BOOL
+      "Dawn 从系统目录加载 d3dcompiler_47.dll（VOILUT_PORTABLE）" FORCE)
 endif()
 
 add_subdirectory("third_party/dawn" EXCLUDE_FROM_ALL)
