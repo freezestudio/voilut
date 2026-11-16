@@ -57,7 +57,10 @@
 
 - 代码改动后必须 `cmake --build build` 通过，无新增警告。
 - 涉及窗宽窗位数值语义时，至少验证：自动窗、ROI 窗、拖动调窗、预设窗
-  四条路径都能改变显示（可用真实 TIFF/DICOM 图像验证一次）。
+  四条路径都能改变显示。前四条已有 CTest 覆盖，先跑 `ctest --test-dir build --output-on-failure`；
+  涉及解码 / 渲染时再用真实 TIFF/DICOM 图像跑一次 `./build/windower <图像>`。
+- 纯计算逻辑一律放进 `voilut_model`（`imaging/src/image_model.cxx`），
+  不要依赖 Dawn / 窗口系统，以便无 GPU 环境下测试。
 - 头文件注释改动后跑 `doxygen Doxyfile`，确认无 `WARN_IF_DOC_ERROR` 报警。
 - 依赖不全时一律使用 `bash scripts/install_deps.sh`（或单独运行其中某个脚本）：
   它会安装 jinja2/markupsafe，并在网络较慢时逐个重新获取被中断的子依赖。
@@ -71,6 +74,26 @@
   - 主循环前 3 帧使用 `glfwPollEvents` 预热，让字体图集与布局稳定。
 - `std::println` 在 stdout 重定向时是全缓冲：`main` 中已设置行缓冲，
   否则日志文件里看不到「已加载 …」。
+
+## 发行构建（单文件）
+
+- 单文件产物：`-DVOILUT_PORTABLE=ON -DVOILUT_EMBED_SHADERS=ON -DCMAKE_BUILD_TYPE=Release`，
+  产物目录只有一个 `windower`（Linux strip 后约 19 MB）。
+- shader 嵌入由 CMake 生成 `build/generated/embedded_shaders.h`（不用 `#embed`：
+  MSVC 支持度不确定；GCC 17 已支持 `#embed`，二者等价）。新增着色器时要在
+  `VOILUT_EMBEDDED_SHADERS`（文件名=数组名）里登记。开发时用环境变量
+  `VOILUT_SHADERS_DIR` 覆盖，改 WGSL 免重编译。
+- **glibc 不能静态化**（实测：Dawn / GLFW 用 `dlopen` 加载 libvulkan / libX11 /
+  libwayland，全静态 `-static` 启动即崩溃）；`libm` / `libpthread` 也必须保持
+  动态（`libm.a` 引用 glibc 内部符号 `_dl_x86_cpu_features`）。静态化范围只到
+  libtiff 及其压缩依赖、zlib、libstdc++、libgcc。发行前请确认 `readelf -d` 的
+  `NEEDED` 只剩 `libm.so.6` / `libc.so.6` / `ld-linux`。
+- 单文件仍依赖系统显卡驱动（Vulkan ICD），无法随包分发；glibc 下限 = 构建机
+  版本，要兼容旧发行版请在对应容器里构建。
+- Windows：CMake 已固定 `DAWN_USE_BUILT_DXC=OFF`，D3D12 用系统 `d3dcompiler_47.dll`
+  （FXC / SM 5.1）；不要打开它——会额外依赖 `dxcompiler.dll` 与 `dxil.dll`，
+  单文件发行就破了。便携构建同时要求 `/MT`（CMake 已自动设置）与静态 vcpkg
+  triplet（`x64-windows-static`）。
 
 ## 文档约定
 

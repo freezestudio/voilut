@@ -2,19 +2,27 @@
 // shader_loader.cxx —— 读取 WGSL 着色器源码
 // ============================================================
 // 两种方案：
-//   A) 运行时读取文件（当前采用）：实现简单，修改 shader 无需重新编译 C++；
+//   A) 运行时读取文件（默认开发构建）：修改 shader 无需重新编译 C++；
 //      缺点是可执行文件依赖 shaders/ 目录的位置。
-//   B) C++26 #embed（待工具链支持）：编译期把 shader 内嵌进二进制，
-//      单文件分发、启动更快。
+//   B) 编译期嵌入（CMake 选项 VOILUT_EMBED_SHADERS=ON）：CMake 把 shader
+//      转成字节数组写进 generated/embedded_shaders.h，单文件分发、启动更快。
+//      开发时仍可用环境变量 VOILUT_SHADERS_DIR 指到源码树临时覆盖。
 // ============================================================
 
 #include "shader_loader.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
+
+// 嵌入模式下由 CMake 生成（build/generated/embedded_shaders.h），
+// 提供 voilut::embedded::kShaders。
+#if defined(VOILUT_EMBED_SHADERS)
+#include "embedded_shaders.h"
+#endif
 
 // Windows 下用 GetModuleFileNameW 定位可执行文件目录（便携版把 shaders/ 放在 exe 旁边）。
 #if defined(_WIN32)
@@ -61,28 +69,25 @@ namespace
 #endif
         return {};
     }
-} // namespace
 
-namespace voilut
-{
-
-    std::expected<std::string, std::string> ReadShaderSource(std::string_view fileName)
+    /// @brief 按候选路径读入整个着色器文件。
+    /// @param fileName 文件名（如 `"image.wgsl"`）。
+    /// @param preferred_dir 优先尝试的目录（环境变量覆盖；为空时跳过）。
+    /// @return 成功时含源码，失败时含错误说明。
+    std::expected<std::string, std::string> read_from_disk(
+        std::string_view fileName, const std::filesystem::path &preferred_dir)
     {
-        // ----------------------------------------------------------
-        // 方案 B（C++26 #embed）预留写法，等 GCC 完整支持后启用：
-        //   constexpr auto shaderData = #embed EMBEDDED_SHADER_PATH;
-        //   return std::string(shaderData.begin(), shaderData.end());
-        // 对应的编译宏在 CMakeLists.txt 里（SHADER_EMBED）。
-        // ----------------------------------------------------------
-
-        // ----------------------------------------------------------
-        // 方案 A：按候选路径依次查找并整文件读入
+        // 候选顺序：
+        //   0) 环境变量指定的目录（仅嵌入模式下用于开发覆盖）
         //   1) 可执行文件旁的 shaders/  —— 便携版（解压后即可运行）
         //   2) 编译期注入的 SHADERS_DIR —— 构建时复制到输出目录的着色器
         //   3) 当前工作目录的 shaders/  —— 手动指定运行目录
-        // ----------------------------------------------------------
         const std::filesystem::path name(fileName);
         std::vector<std::filesystem::path> candidates;
+        if (!preferred_dir.empty())
+        {
+            candidates.push_back(preferred_dir / name);
+        }
         const std::filesystem::path exe_dir = executable_directory();
         if (!exe_dir.empty())
         {
@@ -106,6 +111,34 @@ namespace voilut
         // 返回错误而不是抛异常：调用者必须显式处理
         return std::unexpected("无法读取着色器文件: " + std::string(fileName) +
                                "（已尝试可执行文件旁、构建配置的着色器目录与当前目录的 shaders/）");
+    }
+} // namespace
+
+namespace voilut
+{
+
+    std::expected<std::string, std::string> ReadShaderSource(std::string_view fileName)
+    {
+#if defined(VOILUT_EMBED_SHADERS)
+        // 嵌入模式：优先用环境变量指向的目录（开发期改 WGSL 免重编译）。
+        if (const char *override_dir = std::getenv("VOILUT_SHADERS_DIR");
+            override_dir != nullptr && override_dir[0] != '\0')
+        {
+            return read_from_disk(fileName, std::filesystem::path(override_dir));
+        }
+        // 正常路径：直接从二进制的只读数据段取字节，不碰文件系统。
+        for (const embedded::ShaderSource &shader : embedded::kShaders)
+        {
+            if (shader.name == fileName)
+            {
+                return std::string(reinterpret_cast<const char *>(shader.data), shader.size);
+            }
+        }
+        return std::unexpected("未知的内嵌着色器: " + std::string(fileName));
+#else
+        // 非嵌入模式：按候选路径读文件（开发构建）。
+        return read_from_disk(fileName, {});
+#endif
     }
 
 } // namespace voilut

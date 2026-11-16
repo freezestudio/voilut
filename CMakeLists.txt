@@ -71,8 +71,79 @@ endif()
 # ------------------------------------------------------------
 # 依赖查找
 # ------------------------------------------------------------
+# 发行选项：静态链接除 glibc 与系统显卡驱动外的全部依赖，产物只有一个可执行文件。
+# glibc 不能静态化 —— Dawn / GLFW 用 dlopen 加载 libvulkan / libX11 / libwayland，
+# 静态 glibc 下会启动即崩溃（已实测）。
+option(VOILUT_PORTABLE "静态链接 libtiff / zlib / libstdc++ 等（单文件发行）" OFF)
+
+# Windows 单文件发行的两个前提：静态运行库（/MT）与静态 vcpkg triplet。
+# 两者任一没满足，exe 旁边就会多出 vcruntime140.dll 或依赖的 DLL。
+if(VOILUT_PORTABLE AND WIN32)
+  if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING
+        "VOILUT_PORTABLE：静态运行库 /MT" FORCE)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+      message(WARNING
+        "VOILUT_PORTABLE 建议用 -DCMAKE_BUILD_TYPE=Release：vcpkg 静态库是 Release 构建")
+    endif()
+  else()
+    message(WARNING
+      "VOILUT_PORTABLE 在 Windows 目前只支持 MSVC（/MT + 静态 vcpkg triplet），\n"
+      "当前编译器为 ${CMAKE_CXX_COMPILER_ID}，请手确保静态运行库与静态依赖。")
+  endif()
+  if(DEFINED VCPKG_TARGET_TRIPLET AND NOT VCPKG_TARGET_TRIPLET MATCHES "static$")
+    message(WARNING
+      "VOILUT_PORTABLE 需要静态 CRT 的 vcpkg triplet（如 x64-windows-static），\n"
+      "当前为 ${VCPKG_TARGET_TRIPLET}：产物会依赖 MSVC 运行库或第三方 DLL。")
+  endif()
+endif()
+
 # TIFF：16 位灰度图像解码（系统包 / vcpkg 均可提供 TIFF::TIFF）。
-find_package(TIFF REQUIRED)
+if(VOILUT_PORTABLE AND UNIX AND NOT APPLE)
+  # FindTIFF 选到 .a 时不会带上 libtiff 自身的压缩库依赖，改用 pkg-config --static
+  # 取完整依赖链，并逐个换成静态库（否则 -lxxx 仍优先命中 .so）。
+  find_package(PkgConfig REQUIRED)
+  execute_process(
+    COMMAND ${PKG_CONFIG_EXECUTABLE} --static --libs libtiff-4
+    OUTPUT_VARIABLE _tiff_static_flags
+    ERROR_VARIABLE _tiff_pc_error
+    RESULT_VARIABLE _tiff_pc_result
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _tiff_pc_result EQUAL 0)
+    message(FATAL_ERROR "pkg-config 未找到 libtiff-4：${_tiff_pc_error}")
+  endif()
+  separate_arguments(_tiff_static_flags UNIX_COMMAND "${_tiff_static_flags}")
+  set(TIFF_LINK_LIBRARIES "")
+  foreach(_flag IN LISTS _tiff_static_flags)
+    if(_flag MATCHES "^-l(.+)$")
+      set(_name "${CMAKE_MATCH_1}")
+      if(_name MATCHES "^(m|dl|rt|pthread|c)$")
+        # glibc 自带，必须保持动态：libm.a / libpthread.a 引用 glibc 内部符号
+        # （如 _dl_x86_cpu_features），与动态 libc 链接会报未定义引用。
+        list(APPEND TIFF_LINK_LIBRARIES "${_name}")
+      else()
+        find_library(VOILUT_STATIC_${_name} NAMES "lib${_name}.a")
+        if(VOILUT_STATIC_${_name})
+          list(APPEND TIFF_LINK_LIBRARIES "${VOILUT_STATIC_${_name}}")
+        else()
+          message(FATAL_ERROR
+            "缺少静态库 lib${_name}.a（libtiff 的压缩支持依赖），请安装对应的开发包")
+        endif()
+      endif()
+    endif()
+  endforeach()
+  message(STATUS "VOILUT_PORTABLE：libtiff 静态依赖 → ${TIFF_LINK_LIBRARIES}")
+
+  # GDCM 以 GDCM_USE_SYSTEM_ZLIB=ON 链接系统 zlib；这里指定静态库，
+  # 避免最终产物仍 NEEDED libz.so.1。必须在 add_subdirectory(GDCM) 之前设置。
+  find_library(VOILUT_ZLIB_STATIC NAMES "libz.a" REQUIRED)
+  set(ZLIB_LIBRARY "${VOILUT_ZLIB_STATIC}" CACHE FILEPATH "静态 zlib（VOILUT_PORTABLE）" FORCE)
+  set(ZLIB_LIBRARY_RELEASE "${VOILUT_ZLIB_STATIC}" CACHE FILEPATH "静态 zlib（VOILUT_PORTABLE）" FORCE)
+  set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "静态 zlib（VOILUT_PORTABLE）" FORCE)
+else()
+  find_package(TIFF REQUIRED)
+  set(TIFF_LINK_LIBRARIES TIFF::TIFF)
+endif()
 
 # ------------------------------------------------------------
 # Dawn 配置
@@ -94,6 +165,10 @@ set(TINT_BUILD_SPV_WRITER ON)      # WGSL → SPIR-V（Vulkan 后端需要）
 set(TINT_BUILD_GLSL_WRITER OFF)
 set(TINT_BUILD_GLSL_VALIDATOR OFF)
 set(TINT_BUILD_CMD_TOOLS OFF)
+# 不启用 Dawn 自带的 DXC：否则 Windows 运行时还需要随包提供
+# dxcompiler.dll / dxil.dll，破坏单文件发行。关闭后 D3D12 走系统自带的
+# d3dcompiler_47.dll（FXC，Shader Model 5.1），Win10+ 均具备。
+set(DAWN_USE_BUILT_DXC OFF CACHE BOOL "不启用内置 DXC（Windows 单文件发行）" FORCE)
 
 # Dawn 缺失时自动调用 scripts/install_dawn.{sh,ps1} 获取（约 5~20 分钟，取决于网络）。
 set(DAWN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dawn")
@@ -148,6 +223,59 @@ target_compile_options(voilut_core PRIVATE ${PROJECT_WARNINGS})
 # 运行时优先查找可执行文件旁的 shaders/；开发构建由下方的 windower_shaders 目标复制生成。
 target_compile_definitions(voilut_core PRIVATE SHADERS_DIR="shaders")
 
+# ------------------------------------------------------------
+# 着色器嵌入（单文件发行）
+# ------------------------------------------------------------
+# 开启后把 shaders/*.wgsl 转成 C++ 字节数组编进二进制，运行时不再读文件。
+# 生成头文件而不是用 #embed：MSVC 对 #embed 的支持不如 GCC/Clang 确定，
+# 生成方案在所有编译器上行为一致（GCC 17 亦可用 #embed，二者等价）。
+option(VOILUT_EMBED_SHADERS "把 shaders/*.wgsl 编入二进制（发行时不需附带 shaders/）" OFF)
+if(VOILUT_EMBED_SHADERS)
+  # 文件名 → 生成的 C++ 数组名（新增着色器时在此登记）
+  set(VOILUT_EMBEDDED_SHADERS "image.wgsl=kEmbeddedImageWgsl")
+  set(_embedded_header "${CMAKE_BINARY_DIR}/generated/embedded_shaders.h")
+  set(_embedded_content [=[// ============================================================
+// 由 CMakeLists.txt 生成，请勿手改：shaders/*.wgsl 的原始字节。
+// ============================================================
+#pragma once
+
+#include <cstddef>
+#include <string_view>
+
+namespace voilut::embedded
+{
+    /// @brief 一段内嵌着色器（名称与字节内容）。
+    struct ShaderSource
+    {
+        std::string_view name;
+        const unsigned char *data;
+        std::size_t size;
+    };
+]=])
+  set(_embedded_entries "")
+  foreach(_mapping IN LISTS VOILUT_EMBEDDED_SHADERS)
+    string(REPLACE "=" ";" _pair "${_mapping}")
+    list(GET _pair 0 _shader_file)
+    list(GET _pair 1 _shader_symbol)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader_file}" _shader_hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _shader_bytes "${_shader_hex}")
+    string(REGEX REPLACE "((0x[0-9a-f][0-9a-f],){16})" "\\1\n        " _shader_bytes "${_shader_bytes}")
+    string(APPEND _embedded_content
+      "\n    /// @brief ${_shader_file} 的原始字节。\n    inline constexpr unsigned char ${_shader_symbol}[] = {\n        ${_shader_bytes}\n    };\n")
+    string(APPEND _embedded_entries "        {\"${_shader_file}\", ${_shader_symbol}, sizeof(${_shader_symbol})},\n")
+    # shader 改动后重新配置，保证嵌入内容不过期
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader_file}")
+  endforeach()
+  string(APPEND _embedded_content
+    "\n    /// @brief 全部内嵌着色器。\n    inline constexpr ShaderSource kShaders[] = {\n${_embedded_entries}    };\n} // namespace voilut::embedded\n")
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
+  file(WRITE "${_embedded_header}" "${_embedded_content}")
+  target_include_directories(voilut_core PRIVATE "${CMAKE_BINARY_DIR}/generated")
+  target_compile_definitions(voilut_core PRIVATE VOILUT_EMBED_SHADERS=1)
+  message(STATUS "VOILUT_EMBED_SHADERS：着色器嵌入 ${_embedded_header}")
+endif()
+
 # Dawn 的 WebGPU 实现 + GLFW 的 WebGPU 适配层。
 target_link_libraries(voilut_core PUBLIC webgpu_dawn webgpu_glfw glfw)
 
@@ -188,9 +316,16 @@ endif()
 # ------------------------------------------------------------
 # imaging：窗宽窗位核心库（静态库）
 # ------------------------------------------------------------
+# 纯计算部分单独成库：不链接 Dawn / GDCM，可以在无 GPU 环境下直接测试、
+# 也被 windower 与单元测试共用（避免重复编译 image_model.cxx）。
+add_library(voilut_model STATIC
+  imaging/src/image_model.cxx
+)
+target_include_directories(voilut_model PUBLIC imaging/include)
+target_compile_options(voilut_model PRIVATE ${PROJECT_WARNINGS})
+
 # 职责：解码 16 位像素 → 统计（直方图 / p1 p99）→ 窗设置 → GPU 渲染管线。
 add_library(voilut STATIC
-  imaging/src/image_model.cxx
   imaging/src/image_renderer.cxx
   imaging/src/image_source.cxx
   imaging/src/viewport.cxx
@@ -215,7 +350,7 @@ if(NOT WIN32)
     ${CMAKE_BINARY_DIR}/third_party/GDCM/Source/Common)
 endif()
 
-target_link_libraries(voilut PUBLIC voilut_core PRIVATE TIFF::TIFF gdcmMSFF)
+target_link_libraries(voilut PUBLIC voilut_core PRIVATE voilut_model ${TIFF_LINK_LIBRARIES} gdcmMSFF)
 
 # ------------------------------------------------------------
 # Dear ImGui：Windower 的 UI（GLFW + WebGPU/Dawn 后端）
@@ -256,16 +391,28 @@ add_executable(windower apps/windower.cxx)
 target_compile_options(windower PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(windower PRIVATE voilut imgui)
 
+if(VOILUT_PORTABLE AND UNIX AND NOT APPLE)
+  # libstdc++ / libgcc 静态化：去掉对构建机 /opt/gcc-17 的 RUNPATH 依赖。
+  target_link_options(windower PRIVATE -static-libstdc++ -static-libgcc)
+  # 单文件发行不需要 RUNPATH（glibc 由系统 ld.so 解析）。
+  set_target_properties(windower PROPERTIES BUILD_RPATH "" INSTALL_RPATH "")
+endif()
+
 # 着色器随可执行文件分发：运行时通过可执行文件旁的 shaders/ 查找，
 # 不依赖源码树的绝对路径。每次构建都同步一次，保证修改 WGSL 后立即生效。
-add_custom_target(windower_shaders ALL
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders" "$<TARGET_FILE_DIR:windower>/shaders"
-  COMMENT "复制 shaders/ 到可执行文件目录")
-add_dependencies(windower windower_shaders)
+# 嵌入模式（VOILUT_EMBED_SHADERS=ON）下不再复制，产物目录只有一个可执行文件。
+if(NOT VOILUT_EMBED_SHADERS)
+  add_custom_target(windower_shaders ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_CURRENT_SOURCE_DIR}/shaders" "$<TARGET_FILE_DIR:windower>/shaders"
+    COMMENT "复制 shaders/ 到可执行文件目录")
+  add_dependencies(windower windower_shaders)
+endif()
 
 # Windows：Dawn 的 D3D12 后端运行时需要 d3dcompiler_47.dll（由 Windows SDK 提供）。
-if(WIN32)
+# 单文件发行（VOILUT_PORTABLE）时不复制：Windows 10 及以上系统自带该 DLL，
+# 放在 exe 旁反而会多出一个暴露给用户的文件。
+if(WIN32 AND NOT VOILUT_PORTABLE)
   find_file(D3DCOMPILER47_DLL d3dcompiler_47.dll
     PATHS "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/Redist"
     PATH_SUFFIXES D3D/x64
@@ -276,6 +423,17 @@ if(WIN32)
         "${D3DCOMPILER47_DLL}" "$<TARGET_FILE_DIR:windower>"
       COMMENT "复制 d3dcompiler_47.dll 到可执行文件目录")
   endif()
+endif()
+
+# ------------------------------------------------------------
+# 单元测试（纯计算，不需要 GPU / 窗口）
+# ------------------------------------------------------------
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(window_model_test tests/window_model_test.cxx)
+  target_link_libraries(window_model_test PRIVATE voilut_model)
+  target_compile_options(window_model_test PRIVATE ${PROJECT_WARNINGS})
+  add_test(NAME window_model_test COMMAND window_model_test)
 endif()
 
 # ------------------------------------------------------------

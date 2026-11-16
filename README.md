@@ -76,6 +76,7 @@ bash scripts/install_deps.sh        # = install_dawn.sh + install_gdcm.sh + inst
 ```bash
 cmake -B build -G Ninja
 cmake --build build
+ctest --test-dir build              # 纯计算单元测试（无需 GPU）
 ./build/windower 图像.tif          # 或 .dcm
 ./build/windower ./samples/一组图像/  # 目录会展开成图像列表
 ./build/windower                   # 无参数：窗口内「打开文件夹...」或拖放
@@ -88,6 +89,52 @@ vcpkg install tiff gdcm --triplet x64-windows
 powershell -ExecutionPolicy Bypass -File scripts\install_dawn.ps1
 cmd /c "call `"<VS>\VC\Auxiliary\Build\vcvars64.bat`" >nul && set `"VCPKG_ROOT=C:\vcpkg`" && cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build"
 ```
+
+### 单文件发行构建
+
+默认构建需要把 `shaders/` 放在可执行文件旁。发行版可以只产出一个可执行文件，
+运行时不再读取任何随附文件：
+
+```bash
+cmake -B build-release -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DVOILUT_PORTABLE=ON \
+  -DVOILUT_EMBED_SHADERS=ON
+cmake --build build-release
+strip --strip-all build-release/windower    # 可选：去掉调试符号
+```
+
+- `VOILUT_EMBED_SHADERS=ON`：CMake 把 `shaders/*.wgsl` 转成 C++ 字节数组
+  （`build-release/generated/embedded_shaders.h`）编进二进制。
+  开发时可用环境变量 `VOILUT_SHADERS_DIR=/path/to/shaders` 覆盖，改 WGSL 免重编译。
+- `VOILUT_PORTABLE=ON`：libtiff 及其压缩依赖（webp / Lerc / jbig / zstd / lzma /
+  jpeg / deflate）、zlib、libstdc++、libgcc 全部静态链接，产物只依赖系统 glibc
+  与显卡驱动。
+
+Windows 单文件发行（静态 triplet + `/MT`，`d3dcompiler_47.dll` 由系统提供）：
+
+```powershell
+cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  -DVOILUT_PORTABLE=ON -DVOILUT_EMBED_SHADERS=ON `
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
+cmake --build build-release
+```
+
+运行时仍然需要系统环境：
+
+| 平台 | 系统要求 |
+|---|---|
+| Linux | glibc ≥ 构建机版本；Vulkan 1.1+ 驱动（`libvulkan.so.1`）；X11 或 Wayland 客户端库 |
+| Windows | Windows 10+（系统自带 `d3dcompiler_47.dll`）；D3D12 驱动 |
+
+> glibc 不能静态链接：Dawn / GLFW 运行时用 `dlopen` 加载 Vulkan 与窗口系统库，
+> 静态 glibc 下会启动即崩溃（已实测）。要控制 glibc 下限，请在目标发行版对应的
+> 容器中构建（例如 Ubuntu 22.04 → glibc 2.35）。
+>
+> Windows 端 CMake 已固定 `DAWN_USE_BUILT_DXC=OFF`：D3D12 走系统自带的
+> `d3dcompiler_47.dll`（FXC / Shader Model 5.1），不需要 `dxcompiler.dll`、
+> `dxil.dll`。若手动打开该选项，产物就需要额外随包这两个 DLL。
 
 ---
 
@@ -131,17 +178,19 @@ cmd /c "call `"<VS>\VC\Auxiliary\Build\vcvars64.bat`" >nul && set `"VCPKG_ROOT=C
 core/      通用基础设施（静态库 voilut_core）
            context       WebGPU 环境（协程式 Instance/Adapter/Device 初始化）
            coroutine     task<T> / async_value<T> / sync_wait
-           shader_loader 运行时读取 shaders/*.wgsl
+           shader_loader 着色器读取（开发）或内嵌字节（发行）
            window        默认窗口尺寸
 
-imaging/   窗宽窗位核心（静态库 voilut）
+imaging/   窗宽窗位核心（静态库 voilut；纯计算部分为 voilut_model）
            image_model    统计、直方图、自动窗、ROI 窗、预设窗、拖动调窗
+                          （独立静态库 voilut_model，不链接 Dawn，可无 GPU 测试）
            image_renderer Dawn 渲染管线（uniform 即 WindowParams）
            decode/        TIFF（libtiff）/ DICOM（GDCM）/ 后缀分派
            viewport       缩放平移；orientation 旋转翻转
 
 apps/      windower.cxx —— 可执行程序 windower
 shaders/   image.wgsl  —— 窗宽窗位映射的实现
+tests/     window_model_test.cxx —— 四条调窗路径的单元测试（CTest）
 ```
 
 数据流：
