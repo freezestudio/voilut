@@ -70,9 +70,11 @@ namespace
         return {};
     }
 
+#if defined(VOILUT_EMBED_SHADERS)
     /// @brief 读取环境变量。
-    /// @details MSVC 把 `std::getenv` 标记为不安全（C4996），这里用 `_dupenv_s`
-    ///          获取副本；其它平台仍用标准 `std::getenv`。
+    /// @details 只在嵌入模式（开发覆盖路径）使用。MSVC 把 `std::getenv` 标记为
+    ///          不安全（C4996），这里用 `_dupenv_s` 获取副本；其它平台仍用标准
+    ///          `std::getenv`。
     /// @param name 环境变量名。
     /// @return 变量值；未设置时返回空字符串。
     std::string environment_value(const char *name)
@@ -92,6 +94,7 @@ namespace
         return value != nullptr ? std::string(value) : std::string{};
 #endif
     }
+#endif // VOILUT_EMBED_SHADERS
 
     /// @brief 按候选路径读入整个着色器文件。
     /// @param fileName 文件名（如 `"image.wgsl"`）。
