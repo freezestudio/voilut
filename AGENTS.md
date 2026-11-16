@@ -68,6 +68,15 @@
   - GCC 17 对 `uint64_t{X}` 形式的 constexpr 花括号初始化会 ICE，abseil 里那处
     必须保持 `static_cast<uint64_t>(X)` 写法。
   - Dawn 的 `tint/utils/rtti/traits.h` 必须补 `#include <sstream>`。
+- Windows / MSVC 的已知约束（已处理，修改时不要回退）：
+  - 源码是 UTF-8 无 BOM，项目目标必须带 `/utf-8`（`CMakeLists.txt` 已加）；
+    否则中文区域按 GBK 解析，会把中文注释当成语法错误。
+  - `scripts/*.ps1` 保存为 UTF-8 with BOM：Windows PowerShell 5.1 会把无 BOM
+    的 UTF-8 按 ANSI 解析，导致脚本解析失败。`.gitattributes` 已放行 BOM。
+  - `std::setvbuf(stdout, nullptr, _IOLBF, 0)` 在 MSVC 上会触发 invalid parameter
+    并直接终止进程，`size` 必须 > 0。
+  - 中文路径：libtiff 的 `TIFFOpen` 按 ANSI 解释路径，Windows 下必须用
+    `TIFFOpenW`（`tiff_decode.cxx` 已处理）；GDCM 当前可直接接受 UTF-8。
 - 按需渲染与 ImGui 的两个已知问题（已修复，修改代码时不要回退）：
   - 面板尺寸不要使用自动适应（高度为 0）：首帧之后程序阻塞在 `glfwWaitEvents`，
     没有事件就不会重绘，窗口会停在只有标题栏、高度异常的状态。请使用固定尺寸。
@@ -94,6 +103,14 @@
   （FXC / SM 5.1）；不要打开它——会额外依赖 `dxcompiler.dll` 与 `dxil.dll`，
   单文件发行就破了。便携构建同时要求 `/MT`（CMake 已自动设置）与静态 vcpkg
   triplet（`x64-windows-static`）。
+- Windows 便携构建的两个额外关键选项（CMake 在 `VOILUT_PORTABLE AND WIN32` 时自动设置）：
+  `ABSL_MSVC_STATIC_RUNTIME=ON`（Dawn 内嵌 abseil 默认 `/MD`，与 `/MT` 混链会
+  `LNK2038`）与 `DAWN_FORCE_SYSTEM_COMPONENT_LOAD=ON`（否则 Dawn 对裸文件名
+  `d3dcompiler_47.dll` 使用 `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR`，返回
+  `ERROR_INVALID_PARAMETER`，单文件版启动失败）。
+- Windows 一键发行：
+  `powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 -VcpkgRoot <vcpkg>`。
+  脚本会安装静态依赖、构建、检查非系统 DLL 依赖并复制到 `dist/`。
 
 ## 文档约定
 
