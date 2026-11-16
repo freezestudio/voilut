@@ -121,6 +121,17 @@ cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release `
 cmake --build build-release
 ```
 
+也可以用脚本完成同样的流程：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 `
+  -VcpkgRoot C:\vcpkg
+```
+
+脚本会安装 `x64-windows-static` 的 TIFF / GDCM、配置并构建
+`build-release\windower.exe`，检查是否残留 vcpkg / MSVC 运行库依赖，最后复制到
+`dist\windower.exe`。依赖已安装时可加 `-SkipVcpkgInstall`。
+
 运行时仍然需要系统环境：
 
 | 平台 | 系统要求 |
