@@ -15,6 +15,8 @@
 //   0            重置窗（DICOM 默认 → p1/p99 自动窗）
 //   F 适应窗口 / I 反色 / L 双线性 / R 旋转 / H 水平翻转 / V 垂直翻转
 //   [ ] 切换图像 / Esc 退出
+//   重置图像     清除窗值、反色、插值、方向、视口与 ROI
+//   操作记录     保存当前 ROI 的原图坐标与窗值
 //
 // 流程：
 //   1) 解析命令行参数（图像 / 目录）并解码首张
@@ -74,6 +76,16 @@ namespace
     // 状态
     // ------------------------------------------------------------
 
+    /// @brief 已记录的 ROI（原图坐标，缩放 / 平移 / 旋转后仍有效）。
+    struct RoiRecord
+    {
+        std::size_t id = 0;
+        std::string image_name;
+        std::string image_path;
+        voilut::Rect rect;
+        voilut::WindowSetting window;
+    };
+
     /// @brief 应用整体状态（回调通过 GLFW 的 user pointer 获取它）。
     struct AppState
     {
@@ -110,14 +122,13 @@ namespace
         double pan_start_x = 0.0;  ///< 平移起点（屏幕 x）。
         double pan_start_y = 0.0;  ///< 平移起点（屏幕 y）。
 
-        // ROI 框选（左键）：屏幕坐标。
+        // ROI 框选（左键）：原图坐标，缩放 / 平移 / 旋转后仍能跟随。
         bool roi_active = false;   ///< 是否正在框选。
         bool roi_done = false;     ///< 是否已完成一次框选。
         bool roi_windowed = false; ///< 当前窗是否来自 ROI 统计。
-        double roi_x0 = 0.0;
-        double roi_y0 = 0.0;
-        double roi_x1 = 0.0;
-        double roi_y1 = 0.0;
+        double roi_start_x = 0.0;  ///< 框选起点（原图坐标）。
+        double roi_start_y = 0.0;
+        voilut::Rect roi_image{};  ///< 当前 ROI（原图坐标）。
 
         // 探针。
         bool hover_valid = false;
@@ -128,6 +139,10 @@ namespace
         // 图像列表（同目录图像）。
         std::vector<std::string> playlist;
         std::size_t playlist_index = 0;
+
+        // 操作记录：已保存的 ROI 及其窗值。
+        std::vector<RoiRecord> roi_records;
+        std::size_t next_roi_id = 1;
 
         // 会话内的「每张图像记住窗值」。
         std::unordered_map<std::string, voilut::WindowSetting> remembered;
@@ -186,6 +201,39 @@ namespace
                 original_v * static_cast<double>(state->image->meta.height)};
     }
 
+    /// @brief 屏幕坐标 → 原图坐标（组合视口变换与方向变换）。
+    std::pair<double, double> screen_to_original(const AppState *state, double x, double y)
+    {
+        if (state->image == nullptr)
+        {
+            return {0.0, 0.0};
+        }
+        const auto [display_x, display_y] = voilut::screen_to_image(state->viewport, x, y);
+        return display_to_original(state, display_x, display_y);
+    }
+
+    /// @brief 原图坐标 → 屏幕坐标（组合方向变换与视口变换）。
+    std::pair<double, double> original_to_screen(const AppState *state, double x, double y)
+    {
+        if (state->image == nullptr || state->image->meta.width == 0 ||
+            state->image->meta.height == 0)
+        {
+            return {0.0, 0.0};
+        }
+        const auto [display_width, display_height] = voilut::display_size(
+            state->image->meta.width, state->image->meta.height, state->orientation);
+        const double u = x / static_cast<double>(state->image->meta.width);
+        const double v = y / static_cast<double>(state->image->meta.height);
+        const auto [display_u, display_v] =
+            voilut::image_uv_to_display_uv(u, v, state->orientation);
+        return {
+            state->viewport.x +
+                display_u * static_cast<double>(display_width) * state->viewport.scale,
+            state->viewport.y +
+                display_v * static_cast<double>(display_height) * state->viewport.scale,
+        };
+    }
+
     /// @brief 把方向应用到渲染器并重新计算适应变换。
     void apply_orientation(AppState *state)
     {
@@ -205,6 +253,37 @@ namespace
                                     : voilut::auto_window(state->image->meta);
         state->roi_windowed = false;
         apply_window(state);
+    }
+
+    /// @brief 重置图像：清除窗值、反色、插值、方向、视口与 ROI，恢复打开时的状态。
+    void reset_image(AppState *state)
+    {
+        if (state->image == nullptr)
+        {
+            return;
+        }
+        // 当前图像不再保留会话内的窗值记忆。
+        state->remembered.erase(state->current_path);
+
+        state->invert = state->image->initial_invert;
+        state->linear = false;
+        state->orientation = {};
+        state->viewport = {};
+
+        state->wl_dragging = false;
+        state->pan_dragging = false;
+        state->roi_active = false;
+        state->roi_done = false;
+        state->roi_windowed = false;
+        state->roi_start_x = 0.0;
+        state->roi_start_y = 0.0;
+        state->roi_image = {};
+
+        state->renderer->set_invert(state->invert);
+        state->renderer->set_interpolation(state->linear);
+        state->renderer->set_orientation(state->orientation);
+        reset_window(state);
+        fit_to_window(state);
     }
 
     /// @brief 应用预设窗。
@@ -229,35 +308,66 @@ namespace
         apply_window(state);
     }
 
-    /// @brief 按当前 ROI 框选统计 p1/p99 并实时设窗（ROI 窗）。
-    void apply_roi_window(AppState *state)
+    /// @brief 从框选起点和当前鼠标位置更新原图坐标 ROI。
+    void update_roi_drag(AppState *state, double screen_x, double screen_y)
     {
         if (state->image == nullptr)
         {
             return;
         }
-        // 屏幕 → 图像坐标（框选区域按屏幕矩形计算，旋转翻转后依然是所见区域）。
-        const auto p0 = voilut::screen_to_image(state->viewport, state->roi_x0, state->roi_y0);
-        const auto p1 = voilut::screen_to_image(state->viewport, state->roi_x1, state->roi_y1);
-        const auto [ix0, iy0] = display_to_original(state, p0.first, p0.second);
-        const auto [ix1, iy1] = display_to_original(state, p1.first, p1.second);
-
-        const voilut::Rect roi{
-            .x = std::min(ix0, ix1),
-            .y = std::min(iy0, iy1),
-            .width = std::max(std::floor(std::abs(ix1 - ix0)), 1.0),
-            .height = std::max(std::floor(std::abs(iy1 - iy0)), 1.0),
+        const auto [image_x, image_y] = screen_to_original(state, screen_x, screen_y);
+        const double image_width = static_cast<double>(state->image->meta.width);
+        const double image_height = static_cast<double>(state->image->meta.height);
+        const double x0 = std::clamp(std::min(state->roi_start_x, image_x), 0.0, image_width);
+        const double y0 = std::clamp(std::min(state->roi_start_y, image_y), 0.0, image_height);
+        const double x1 = std::clamp(std::max(state->roi_start_x, image_x), 0.0, image_width);
+        const double y1 = std::clamp(std::max(state->roi_start_y, image_y), 0.0, image_height);
+        state->roi_image = {
+            .x = x0,
+            .y = y0,
+            .width = x1 - x0,
+            .height = y1 - y0,
         };
+    }
+
+    /// @brief 按当前 ROI 统计 p1/p99 并设窗（ROI 窗）。
+    /// @return ROI 有效且已应用时返回 true。
+    bool apply_roi_window(AppState *state)
+    {
+        if (state->image == nullptr || state->roi_image.width < 1.0 ||
+            state->roi_image.height < 1.0)
+        {
+            return false;
+        }
         const auto setting = voilut::window_for_roi(state->image->pixels,
                                                     state->image->meta.width,
-                                                    state->image->meta.height, roi);
+                                                    state->image->meta.height,
+                                                    state->roi_image);
         if (!setting)
         {
-            return; // 选区太小，保持当前窗
+            return false; // 选区太小，保持当前窗
         }
         state->window_setting = *setting;
         state->roi_windowed = true;
         apply_window(state);
+        return true;
+    }
+
+    /// @brief 把当前 ROI 及其窗值写入操作记录。
+    void record_current_roi(AppState *state)
+    {
+        if (state->image == nullptr || !state->roi_done || state->roi_image.width <= 0.0 ||
+            state->roi_image.height <= 0.0)
+        {
+            return;
+        }
+        state->roi_records.push_back({
+            .id = state->next_roi_id++,
+            .image_name = state->image->name,
+            .image_path = state->current_path,
+            .rect = state->roi_image,
+            .window = state->window_setting,
+        });
     }
 
     /// @brief 把解码结果应用到状态与渲染器。
@@ -280,6 +390,9 @@ namespace
         state->roi_active = false;
         state->roi_done = false;
         state->roi_windowed = false;
+        state->roi_start_x = 0.0;
+        state->roi_start_y = 0.0;
+        state->roi_image = {};
 
         state->renderer->upload(meta.width, meta.height, state->image->pixels);
         state->renderer->set_invert(state->invert);
@@ -555,8 +668,7 @@ namespace
         }
         if (state->roi_active)
         {
-            state->roi_x1 = x;
-            state->roi_y1 = y;
+            update_roi_drag(state, x, y);
             apply_roi_window(state);
         }
     }
@@ -596,17 +708,25 @@ namespace
                     // 左键：框选 ROI（核心交互，实时按框内统计调窗）。
                     state->roi_active = true;
                     state->roi_done = false;
-                    state->roi_x0 = state->roi_x1 = x;
-                    state->roi_y0 = state->roi_y1 = y;
+                    const auto [image_x, image_y] = screen_to_original(state, x, y);
+                    const double image_width = static_cast<double>(state->image->meta.width);
+                    const double image_height = static_cast<double>(state->image->meta.height);
+                    state->roi_start_x = std::clamp(image_x, 0.0, image_width);
+                    state->roi_start_y = std::clamp(image_y, 0.0, image_height);
+                    state->roi_image = {
+                        .x = state->roi_start_x,
+                        .y = state->roi_start_y,
+                        .width = 0.0,
+                        .height = 0.0,
+                    };
                 }
             }
             else if (action == GLFW_RELEASE)
             {
                 if (state->roi_active)
                 {
-                    apply_roi_window(state);
+                    state->roi_done = apply_roi_window(state);
                     state->roi_active = false;
-                    state->roi_done = true;
                 }
                 state->wl_dragging = false;
             }
@@ -733,9 +853,7 @@ namespace
         double mouse_x = 0.0;
         double mouse_y = 0.0;
         glfwGetCursorPos(state->window, &mouse_x, &mouse_y);
-        const auto [display_x, display_y] =
-            voilut::screen_to_image(state->viewport, mouse_x, mouse_y);
-        const auto [image_x, image_y] = display_to_original(state, display_x, display_y);
+        const auto [image_x, image_y] = screen_to_original(state, mouse_x, mouse_y);
         const auto value = voilut::pixel_at(state->image->pixels, state->image->meta.width,
                                             state->image->meta.height, image_x, image_y);
         if (value)
@@ -883,7 +1001,8 @@ namespace
         // 尺寸使用固定值：自动适应（高度为 0）要等到第二帧才生效，而本程序按需
         // 渲染（静止时阻塞在 glfwWaitEvents），首帧之后若无事件就不会重绘，
         // 面板会停在只有标题栏、高度异常的状态。
-        ImGui::SetNextWindowSize(ImVec2(kPanelWidth, kPanelHeight), ImGuiCond_FirstUseEver);
+        // 用 Always 避免旧 imgui.ini 继续沿用旧尺寸，导致新布局被裁切。
+        ImGui::SetNextWindowSize(ImVec2(kPanelWidth, kPanelHeight), ImGuiCond_Always);
         ImGui::Begin("Windower · 窗宽窗位");
 
         if (ImGui::Button("打开文件夹..."))
@@ -920,6 +1039,7 @@ namespace
             return;
         }
 
+        const voilut::WindowSetting window_at_frame_start = state->window_setting;
         const voilut::ImageMeta &meta = state->image->meta;
         ImGui::Separator();
         ImGui::Text("%s", state->image->name.c_str());
@@ -1002,6 +1122,12 @@ namespace
             state->roi_windowed = false;
             apply_window(state);
         }
+        ImGui::SameLine();
+        if (ImGui::Button("重置图像"))
+        {
+            reset_image(state);
+        }
+        ImGui::SetItemTooltip("清除窗值、反色、插值、方向、缩放平移和 ROI");
         if (state->image->default_window)
         {
             ImGui::SameLine();
@@ -1100,7 +1226,68 @@ namespace
         ImGui::TextDisabled("R：旋转，H/V：水平/垂直翻转");
         ImGui::TextDisabled("0：重置窗，1–6：预设，[ ]：切换图像");
 
+        // 本帧内通过按钮 / 直方图改窗时，表格已经画完；按需渲染下补一帧刷新。
+        if (state->window_setting.level != window_at_frame_start.level ||
+            state->window_setting.width != window_at_frame_start.width)
+        {
+            glfwPostEmptyEvent();
+        }
+
         ImGui::PopStyleColor();
+        ImGui::End();
+    }
+
+    /// @brief 操作记录面板：保存当前 ROI，并列出已记录区域。
+    void draw_roi_history(AppState *state)
+    {
+        constexpr float kHistoryWidth = 380.0f;
+        constexpr float kHistoryHeight = 260.0f;
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        const float x = std::max(12.0f, display.x - kHistoryWidth - 12.0f);
+        ImGui::SetNextWindowPos(ImVec2(x, 12.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(kHistoryWidth, kHistoryHeight), ImGuiCond_FirstUseEver);
+        ImGui::Begin("操作记录");
+
+        ImGui::BeginDisabled(!state->roi_done);
+        if (ImGui::Button("记录当前 ROI"))
+        {
+            record_current_roi(state);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(state->roi_records.empty());
+        if (ImGui::Button("清空记录"))
+        {
+            state->roi_records.clear();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu 条", state->roi_records.size());
+
+        ImGui::Separator();
+        if (state->roi_records.empty())
+        {
+            ImGui::TextDisabled("尚未记录 ROI");
+            ImGui::End();
+            return;
+        }
+
+        for (auto it = state->roi_records.rbegin(); it != state->roi_records.rend(); ++it)
+        {
+            const RoiRecord &record = *it;
+            ImGui::PushID(static_cast<int>(record.id));
+            ImGui::TextWrapped("#%zu  %s", record.id, record.image_name.c_str());
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("%s", record.image_path.c_str());
+            }
+            ImGui::TextDisabled("原图 ROI (%.0f, %.0f)  %.0f × %.0f", record.rect.x,
+                                record.rect.y, record.rect.width, record.rect.height);
+            ImGui::TextDisabled("窗位 %.0f  窗宽 %.0f", record.window.level, record.window.width);
+            ImGui::PopID();
+            ImGui::Separator();
+        }
+
         ImGui::End();
     }
 
@@ -1137,10 +1324,20 @@ namespace
         {
             return;
         }
-        const ImVec2 a(static_cast<float>(std::min(state->roi_x0, state->roi_x1)),
-                       static_cast<float>(std::min(state->roi_y0, state->roi_y1)));
-        const ImVec2 b(static_cast<float>(std::max(state->roi_x0, state->roi_x1)),
-                       static_cast<float>(std::max(state->roi_y0, state->roi_y1)));
+        if (state->roi_image.width <= 0.0 || state->roi_image.height <= 0.0)
+        {
+            return;
+        }
+        // ROI 存的是原图坐标：每帧重新投影，缩放 / 平移 / 旋转后自动跟随。
+        const auto [screen_x0, screen_y0] = original_to_screen(
+            state, state->roi_image.x, state->roi_image.y);
+        const auto [screen_x1, screen_y1] = original_to_screen(
+            state, state->roi_image.x + state->roi_image.width,
+            state->roi_image.y + state->roi_image.height);
+        const ImVec2 a(static_cast<float>(std::min(screen_x0, screen_x1)),
+                       static_cast<float>(std::min(screen_y0, screen_y1)));
+        const ImVec2 b(static_cast<float>(std::max(screen_x0, screen_x1)),
+                       static_cast<float>(std::max(screen_y0, screen_y1)));
         const ImU32 color = IM_COL32(120, 200, 255, 255);
         if (state->roi_active)
         {
@@ -1334,6 +1531,7 @@ int main(int argc, char **argv)
                 ImGui::NewFrame();
                 update_hover(&state);
                 draw_panel(&state);
+                draw_roi_history(&state);
                 draw_overlay(&state);
                 ImGui::Render();
 
