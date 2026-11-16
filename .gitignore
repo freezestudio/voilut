@@ -18,6 +18,8 @@
 /build-*/
 cmake-build-*/
 /out/
+# 单文件发行脚本默认输出目录
+/dist/
 # ImGui 运行时写出的窗口布局
 /imgui.ini
 /screenshot_*.ppm
