@@ -1739,6 +1739,10 @@ int main(int argc, char **argv)
             IMGUI_CHECKVERSION();
             ImGui::CreateContext();
             ImGui::StyleColorsDark();
+            // 不在工作目录留下 imgui.ini：本程序所有窗口都用 ImGuiCond_Always
+            // 固定位置与尺寸，ini 里没有需要保留的布局；单文件发行也不应产生
+            // 额外文件（否则从不同目录启动会互相覆盖）。
+            ImGui::GetIO().IniFilename = nullptr;
             // 调窗面板控件多（滑块 / 输入 / 预设 / 直方图），减小间距后
             // 在 720p 窗口中不需要滚动条。
             ImGuiStyle &style = ImGui::GetStyle();
