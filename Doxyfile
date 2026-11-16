@@ -1,0 +1,29 @@
+PROJECT_NAME           = "voilut"
+PROJECT_BRIEF          = "16 位影像的窗宽窗位显示引擎 + Windower 应用"
+
+OUTPUT_DIRECTORY       = build/doxygen
+OUTPUT_LANGUAGE        = Chinese
+
+INPUT                  = core \
+                         imaging \
+                         apps
+FILE_PATTERNS          = *.h *.cxx
+RECURSIVE              = YES
+
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+
+JAVADOC_AUTOBRIEF      = YES
+MARKDOWN_SUPPORT       = YES
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HAVE_DOT               = NO
+
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+
+CASE_SENSE_NAMES       = YES
