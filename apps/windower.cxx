@@ -5,8 +5,8 @@
 // 调窗是这个程序的核心交互，其他功能（缩放 / 平移 / 旋转 / 探针）都为它服务。
 //
 // 交互：
-//   左键拖动     调窗（水平 = 窗宽，垂直 = 窗位）—— 核心交互
-//   Shift+左键   框选，按框内 p1/p99 实时调窗（ROI 窗）
+//   左键拖动     框选 ROI，按框内 p1/p99 实时调窗 —— 核心交互
+//   Shift+左键   手动调窗（水平 = 窗宽，垂直 = 窗位）
 //   右键拖动     平移
 //   滚轮         缩放（Ctrl = 窗宽，Shift = 窗位）
 //   ← →          窗位微调（按住 Ctrl 时步进更小）
@@ -110,7 +110,7 @@ namespace
         double pan_start_x = 0.0;  ///< 平移起点（屏幕 x）。
         double pan_start_y = 0.0;  ///< 平移起点（屏幕 y）。
 
-        // ROI 框选（Shift+左键）：屏幕坐标。
+        // ROI 框选（左键）：屏幕坐标。
         bool roi_active = false;   ///< 是否正在框选。
         bool roi_done = false;     ///< 是否已完成一次框选。
         bool roi_windowed = false; ///< 当前窗是否来自 ROI 统计。
@@ -585,19 +585,19 @@ namespace
             {
                 if ((mods & GLFW_MOD_SHIFT) != 0)
                 {
-                    // Shift+左键：ROI 框选（实时按框内统计调窗）。
-                    state->roi_active = true;
-                    state->roi_done = false;
-                    state->roi_x0 = state->roi_x1 = x;
-                    state->roi_y0 = state->roi_y1 = y;
-                }
-                else
-                {
-                    // 左键：拖动调窗（核心交互）。
+                    // Shift+左键：手动调窗（水平 = 窗宽，垂直 = 窗位）。
                     state->wl_dragging = true;
                     state->wl_start_x = x;
                     state->wl_start_y = y;
                     state->wl_base = state->window_setting;
+                }
+                else
+                {
+                    // 左键：框选 ROI（核心交互，实时按框内统计调窗）。
+                    state->roi_active = true;
+                    state->roi_done = false;
+                    state->roi_x0 = state->roi_x1 = x;
+                    state->roi_y0 = state->roi_y1 = y;
                 }
             }
             else if (action == GLFW_RELEASE)
@@ -868,16 +868,22 @@ namespace
         }
     }
 
+    // 面板固定尺寸：宽度要容纳 6 个预设按钮同排，高度要容纳逐行操作说明。
+    constexpr float kPanelWidth = 520.0f;
+    constexpr float kPanelHeight = 710.0f;
+    constexpr float kPanelMargin = 12.0f;
+    constexpr float kPanelTop = 6.0f;
+
     /// @brief 主控制面板。
     void draw_panel(AppState *state)
     {
-        ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(kPanelMargin, kPanelTop), ImGuiCond_FirstUseEver);
         // 面板覆盖在影像上，必须不透明，否则高亮区域背景会降低文字可读性。
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.09f, 0.11f, 1.0f));
         // 尺寸使用固定值：自动适应（高度为 0）要等到第二帧才生效，而本程序按需
         // 渲染（静止时阻塞在 glfwWaitEvents），首帧之后若无事件就不会重绘，
         // 面板会停在只有标题栏、高度异常的状态。
-        ImGui::SetNextWindowSize(ImVec2(372.0f, 620.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(kPanelWidth, kPanelHeight), ImGuiCond_FirstUseEver);
         ImGui::Begin("Windower · 窗宽窗位");
 
         if (ImGui::Button("打开文件夹..."))
@@ -920,44 +926,68 @@ namespace
         ImGui::TextDisabled("%u x %u  ·  %u bit  ·  值域 %.0f ~ %.0f", meta.width, meta.height,
                             meta.bits_per_sample, meta.min_value, meta.max_value);
 
-        ImGui::Separator();
-        ImGui::TextUnformatted("窗宽窗位");
+        ImGui::SeparatorText("窗宽窗位");
 
-        double level = state->window_setting.level;
-        if (ImGui::SliderScalar("窗位", ImGuiDataType_Double, &level, &state->level_min,
-                                &state->level_max, "%.0f"))
+        // 每行：名称 / 滑块 / 数值输入。数值输入在窄窗情况下比滑块更易用。
+        if (ImGui::BeginTable("##window_controls", 3,
+                              ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoPadOuterX))
         {
-            state->window_setting.level = level;
-            state->roi_windowed = false;
-            apply_window(state);
-        }
-        double window_width = state->window_setting.width;
-        if (ImGui::SliderScalar("窗宽", ImGuiDataType_Double, &window_width, &state->width_min,
-                                &state->width_max, "%.0f"))
-        {
-            state->window_setting.width = window_width;
-            state->roi_windowed = false;
-            apply_window(state);
-        }
+            ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+            ImGui::TableSetupColumn("##slider", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("##input", ImGuiTableColumnFlags_WidthFixed, 86.0f);
 
-        // 数值输入（窄窗情况下比滑块更易用）。
-        double level_input = state->window_setting.level;
-        // InputDouble 不支持 EnterReturnsTrue（ImGui 会断言），改用
-        // 「编辑结束」判定：回车或失焦均视为提交。
-        ImGui::InputDouble("窗位数值", &level_input, 0.0, 0.0, "%.1f");
-        if (ImGui::IsItemDeactivatedAfterEdit())
-        {
-            state->window_setting.level = level_input;
-            state->roi_windowed = false;
-            apply_window(state);
-        }
-        double width_input = state->window_setting.width;
-        ImGui::InputDouble("窗宽数值", &width_input, 0.0, 0.0, "%.1f");
-        if (ImGui::IsItemDeactivatedAfterEdit())
-        {
-            state->window_setting.width = std::max(width_input, 1.0);
-            state->roi_windowed = false;
-            apply_window(state);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("窗位");
+            ImGui::TableSetColumnIndex(1);
+            double level = state->window_setting.level;
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderScalar("##level", ImGuiDataType_Double, &level, &state->level_min,
+                                    &state->level_max, "%.0f"))
+            {
+                state->window_setting.level = level;
+                state->roi_windowed = false;
+                apply_window(state);
+            }
+            ImGui::TableSetColumnIndex(2);
+            double level_input = state->window_setting.level;
+            ImGui::SetNextItemWidth(-1.0f);
+            // InputDouble 不支持 EnterReturnsTrue（ImGui 会断言），改用
+            // 「编辑结束」判定：回车或失焦均视为提交。
+            ImGui::InputDouble("##level_input", &level_input, 0.0, 0.0, "%.1f");
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                state->window_setting.level = level_input;
+                state->roi_windowed = false;
+                apply_window(state);
+            }
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("窗宽");
+            ImGui::TableSetColumnIndex(1);
+            double window_width = state->window_setting.width;
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderScalar("##width", ImGuiDataType_Double, &window_width,
+                                    &state->width_min, &state->width_max, "%.0f"))
+            {
+                state->window_setting.width = window_width;
+                state->roi_windowed = false;
+                apply_window(state);
+            }
+            ImGui::TableSetColumnIndex(2);
+            double width_input = state->window_setting.width;
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputDouble("##width_input", &width_input, 0.0, 0.0, "%.1f");
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                state->window_setting.width = std::max(width_input, 1.0);
+                state->roi_windowed = false;
+                apply_window(state);
+            }
+            ImGui::EndTable();
         }
 
         ImGui::Spacing();
@@ -984,20 +1014,24 @@ namespace
         }
 
         ImGui::TextDisabled("预设（按值域比例）");
+        // 全部预设排成一行，按钮宽度按可用宽度均分。
+        const float preset_spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float preset_width =
+            (ImGui::GetContentRegionAvail().x - preset_spacing * 5.0f) /
+            static_cast<float>(voilut::kWindowPresets.size());
         for (std::size_t i = 0; i < voilut::kWindowPresets.size(); ++i)
         {
-            if (i % 3 != 0)
+            if (i > 0)
             {
                 ImGui::SameLine();
             }
-            if (ImGui::Button(voilut::kWindowPresets[i].name))
+            if (ImGui::Button(voilut::kWindowPresets[i].name, ImVec2(preset_width, 0.0f)))
             {
                 apply_preset(state, i);
             }
         }
 
-        ImGui::Spacing();
-        draw_histogram(state, 96.0f);
+        draw_histogram(state, 72.0f);
         ImGui::TextDisabled("直方图：高亮 = 当前窗；黄线 = p1/p99；拖动可移动窗位");
 
         ImGui::Separator();
@@ -1054,9 +1088,17 @@ namespace
         {
             ImGui::TextDisabled("像素: -");
         }
-        ImGui::TextDisabled(
-            "左键拖动调窗 / Shift+左键框选调窗 / 右键平移 / 滚轮缩放\n"
-            "Ctrl+滚轮窗宽 / Shift+滚轮窗位 / ←→ 窗位 / ↑↓ 窗宽");
+        ImGui::SeparatorText("操作说明");
+        ImGui::TextDisabled("左键拖动：框选 ROI 调窗");
+        ImGui::TextDisabled("Shift+左键拖动：手动调窗");
+        ImGui::TextDisabled("右键拖动：平移");
+        ImGui::TextDisabled("滚轮：以光标为中心缩放");
+        ImGui::TextDisabled("Ctrl+滚轮：窗宽");
+        ImGui::TextDisabled("Shift+滚轮：窗位");
+        ImGui::TextDisabled("←/→：窗位微调，↑/↓：窗宽微调");
+        ImGui::TextDisabled("F：适应窗口，I：反色，L：双线性");
+        ImGui::TextDisabled("R：旋转，H/V：水平/垂直翻转");
+        ImGui::TextDisabled("0：重置窗，1–6：预设，[ ]：切换图像");
 
         ImGui::PopStyleColor();
         ImGui::End();
@@ -1075,7 +1117,7 @@ namespace
         const std::string text =
             std::format("L {:.0f}   W {:.0f}", state->window_setting.level,
                         state->window_setting.width);
-        const ImVec2 pos(420.0f, 16.0f);
+        const ImVec2 pos(kPanelMargin + kPanelWidth + 16.0f, 16.0f);
         for (int dx = -1; dx <= 1; ++dx)
         {
             for (int dy = -1; dy <= 1; ++dy)
