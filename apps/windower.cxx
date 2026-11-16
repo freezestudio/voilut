@@ -17,6 +17,7 @@
 //   [ ] 切换图像 / Esc 退出
 //   重置图像     清除窗值、反色、插值、方向、视口与 ROI
 //   操作记录     保存当前 ROI 的原图坐标与窗值
+//   菜单栏       文件 / 图像 / 视图；视图菜单可显隐面板
 //
 // 流程：
 //   1) 解析命令行参数（图像 / 目录）并解码首张
@@ -144,6 +145,10 @@ namespace
         std::vector<RoiRecord> roi_records;
         std::size_t next_roi_id = 1;
 
+        // 面板显隐（菜单栏可切换）。
+        bool show_control_panel = true;
+        bool show_history_panel = true;
+
         // 会话内的「每张图像记住窗值」。
         std::unordered_map<std::string, voilut::WindowSetting> remembered;
         bool remember_window = true;
@@ -154,6 +159,35 @@ namespace
     // ------------------------------------------------------------
     // 辅助函数
     // ------------------------------------------------------------
+
+    /// @brief 显示上一个控件的工具提示（按需渲染下立即显示，不等待延迟）。
+    void item_tooltip(const char *text)
+    {
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        {
+            ImGui::SetTooltip("%s", text);
+        }
+    }
+
+    /// @brief 菜单项：激活后补一帧，让菜单关闭和勾选状态立即刷新。
+    bool menu_item(const char *label, const char *shortcut = nullptr, bool selected = false)
+    {
+        if (ImGui::MenuItem(label, shortcut, selected))
+        {
+            glfwPostEmptyEvent();
+            return true;
+        }
+        return false;
+    }
+
+    /// @brief 可勾选菜单项：切换布尔值后补一帧刷新。
+    void menu_item_toggle(const char *label, bool *value)
+    {
+        if (ImGui::MenuItem(label, nullptr, value))
+        {
+            glfwPostEmptyEvent();
+        }
+    }
 
     /// @brief 把当前窗写入渲染器（唯一的 set_window 调用入口，保证状态一致）。
     void apply_window(AppState *state)
@@ -590,6 +624,186 @@ namespace
     }
 #endif
 
+    /// @brief 打开目录选择框并加载其中的图像。
+    void open_folder(AppState *state)
+    {
+        const std::string dir = choose_directory_dialog_impl();
+        if (!dir.empty())
+        {
+            open_directory(state, dir);
+        }
+    }
+
+    /// @brief 顶部主菜单栏：文件 / 图像 / 视图。
+    void draw_menu_bar(AppState *state)
+    {
+        if (!ImGui::BeginMainMenuBar())
+        {
+            return;
+        }
+
+        const bool has_image = state->image != nullptr;
+
+        if (ImGui::BeginMenu("文件"))
+        {
+            if (menu_item("打开文件夹...", "Ctrl+O"))
+            {
+                open_folder(state);
+            }
+            item_tooltip("选择包含 TIFF / DICOM 图像的目录");
+
+            ImGui::Separator();
+            ImGui::BeginDisabled(state->playlist.empty());
+            if (menu_item("上一张", "["))
+            {
+                step_playlist(state, -1);
+            }
+            item_tooltip("切换到图像列表中的上一张");
+            if (menu_item("下一张", "]"))
+            {
+                step_playlist(state, 1);
+            }
+            item_tooltip("切换到图像列表中的下一张");
+            ImGui::EndDisabled();
+
+            ImGui::Separator();
+            if (menu_item("退出", "Ctrl+Q"))
+            {
+                state->quit_requested = true;
+                glfwSetWindowShouldClose(state->window, GLFW_TRUE);
+            }
+            item_tooltip("关闭 Windower");
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("图像"))
+        {
+            ImGui::BeginDisabled(!has_image);
+            if (menu_item("重置图像", "Ctrl+R"))
+            {
+                reset_image(state);
+            }
+            item_tooltip("清除窗值、反色、插值、方向、视口和 ROI");
+
+            if (menu_item("重置窗", "0"))
+            {
+                reset_window(state);
+            }
+            item_tooltip("只恢复 DICOM 默认窗或 p1/p99 自动窗");
+
+            if (menu_item("自动窗 p1/p99"))
+            {
+                state->window_setting = voilut::auto_window(state->image->meta);
+                state->roi_windowed = false;
+                apply_window(state);
+            }
+            item_tooltip("按整幅图像的 1% / 99% 分位数计算窗");
+
+            const bool has_default_window =
+                state->image != nullptr && state->image->default_window.has_value();
+            ImGui::BeginDisabled(!has_default_window);
+            if (menu_item("DICOM 默认窗"))
+            {
+                state->window_setting = *state->image->default_window;
+                state->roi_windowed = false;
+                apply_window(state);
+            }
+            item_tooltip("使用文件自带的 WindowCenter / WindowWidth");
+            ImGui::EndDisabled();
+
+            ImGui::Separator();
+            if (ImGui::BeginMenu("预设窗"))
+            {
+                for (std::size_t i = 0; i < voilut::kWindowPresets.size(); ++i)
+                {
+                    const std::string shortcut = std::to_string(i + 1);
+                    if (menu_item(voilut::kWindowPresets[i].name, shortcut.c_str()))
+                    {
+                        apply_preset(state, i);
+                    }
+                    item_tooltip("按图像值域比例应用预设窗");
+                }
+                ImGui::EndMenu();
+            }
+
+            ImGui::Separator();
+            if (menu_item("适应窗口", "F"))
+            {
+                fit_to_window(state);
+            }
+            item_tooltip("等比缩放并居中显示整幅图像");
+
+            if (menu_item("旋转 90°", "R"))
+            {
+                state->orientation = voilut::rotate_cw(state->orientation);
+                apply_orientation(state);
+            }
+            item_tooltip("顺时针旋转 90°");
+
+            if (menu_item("水平翻转", "H"))
+            {
+                state->orientation.flip_h = !state->orientation.flip_h;
+                apply_orientation(state);
+            }
+            item_tooltip("左右翻转显示方向");
+
+            if (menu_item("垂直翻转", "V"))
+            {
+                state->orientation.flip_v = !state->orientation.flip_v;
+                apply_orientation(state);
+            }
+            item_tooltip("上下翻转显示方向");
+
+            ImGui::Separator();
+            if (menu_item("反色", "I", state->invert))
+            {
+                state->invert = !state->invert;
+                state->renderer->set_invert(state->invert);
+            }
+            item_tooltip("反转显示灰度");
+
+            if (menu_item("双线性", "L", state->linear))
+            {
+                state->linear = !state->linear;
+                state->renderer->set_interpolation(state->linear);
+            }
+            item_tooltip("放大时使用双线性插值");
+
+            if (menu_item("记住窗值", nullptr, state->remember_window))
+            {
+                state->remember_window = !state->remember_window;
+            }
+            item_tooltip("在当前会话内按图像路径记住窗值");
+            ImGui::EndDisabled();
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("视图"))
+        {
+            menu_item_toggle("窗宽窗位面板", &state->show_control_panel);
+            item_tooltip("显示或隐藏主调窗面板");
+            menu_item_toggle("操作记录面板", &state->show_history_panel);
+            item_tooltip("显示或隐藏 ROI 操作记录面板");
+
+            ImGui::Separator();
+            if (menu_item("显示全部面板"))
+            {
+                state->show_control_panel = true;
+                state->show_history_panel = true;
+            }
+            item_tooltip("同时显示窗宽窗位面板和操作记录面板");
+            if (menu_item("隐藏全部面板"))
+            {
+                state->show_control_panel = false;
+                state->show_history_panel = false;
+            }
+            item_tooltip("隐藏全部面板，仅保留图像和菜单栏");
+            ImGui::EndMenu();
+        }
+
+        ImGui::EndMainMenuBar();
+    }
+
     // ------------------------------------------------------------
     // 回调
     // ------------------------------------------------------------
@@ -757,6 +971,24 @@ namespace
         {
             return;
         }
+        if (action == GLFW_PRESS && (mods & GLFW_MOD_CONTROL) != 0)
+        {
+            switch (key)
+            {
+            case GLFW_KEY_O:
+                open_folder(state);
+                return;
+            case GLFW_KEY_R:
+                reset_image(state);
+                return;
+            case GLFW_KEY_Q:
+                state->quit_requested = true;
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                return;
+            default:
+                break;
+            }
+        }
         // Ctrl 按下时步长更小，便于在窄窗下微调。
         const double fine = (mods & GLFW_MOD_CONTROL) != 0 ? 0.2 : 1.0;
         const double level_step = std::max(state->window_setting.width * 0.02 * fine, 1.0);
@@ -917,6 +1149,7 @@ namespace
     {
         const ImVec2 size(std::max(ImGui::GetContentRegionAvail().x, 32.0f), height);
         ImGui::InvisibleButton("##histogram", size);
+        item_tooltip("在直方图上拖动可移动窗位；高亮为当前窗区间");
         const ImVec2 p0 = ImGui::GetItemRectMin();
         const ImVec2 p1 = ImGui::GetItemRectMax();
 
@@ -986,23 +1219,24 @@ namespace
         }
     }
 
-    // 面板固定尺寸：宽度要容纳 6 个预设按钮同排，高度要容纳逐行操作说明。
+    // 面板固定宽度要容纳 6 个预设按钮同排；顶部让出主菜单栏。
     constexpr float kPanelWidth = 520.0f;
-    constexpr float kPanelHeight = 710.0f;
     constexpr float kPanelMargin = 12.0f;
-    constexpr float kPanelTop = 6.0f;
 
     /// @brief 主控制面板。
     void draw_panel(AppState *state)
     {
-        ImGui::SetNextWindowPos(ImVec2(kPanelMargin, kPanelTop), ImGuiCond_FirstUseEver);
+        const float panel_top = ImGui::GetFrameHeight() + 4.0f;
+        const float panel_height =
+            std::max(620.0f, ImGui::GetIO().DisplaySize.y - panel_top - 4.0f);
+        ImGui::SetNextWindowPos(ImVec2(kPanelMargin, panel_top), ImGuiCond_Always);
         // 面板覆盖在影像上，必须不透明，否则高亮区域背景会降低文字可读性。
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.09f, 0.11f, 1.0f));
         // 尺寸使用固定值：自动适应（高度为 0）要等到第二帧才生效，而本程序按需
         // 渲染（静止时阻塞在 glfwWaitEvents），首帧之后若无事件就不会重绘，
         // 面板会停在只有标题栏、高度异常的状态。
         // 用 Always 避免旧 imgui.ini 继续沿用旧尺寸，导致新布局被裁切。
-        ImGui::SetNextWindowSize(ImVec2(kPanelWidth, kPanelHeight), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(kPanelWidth, panel_height), ImGuiCond_Always);
         ImGui::Begin("Windower · 窗宽窗位");
 
         if (ImGui::Button("打开文件夹..."))
@@ -1013,16 +1247,19 @@ namespace
                 open_directory(state, dir);
             }
         }
+        item_tooltip("选择包含 TIFF / DICOM 图像的目录");
         ImGui::SameLine();
         if (ImGui::Button("上一张 ["))
         {
             step_playlist(state, -1);
         }
+        item_tooltip("切换到图像列表中的上一张");
         ImGui::SameLine();
         if (ImGui::Button("下一张 ]"))
         {
             step_playlist(state, 1);
         }
+        item_tooltip("切换到图像列表中的下一张");
         if (!state->playlist.empty())
         {
             ImGui::SameLine();
@@ -1070,12 +1307,14 @@ namespace
                 state->roi_windowed = false;
                 apply_window(state);
             }
+            item_tooltip("拖动调整窗位；也可在右侧直接输入数值");
             ImGui::TableSetColumnIndex(2);
             double level_input = state->window_setting.level;
             ImGui::SetNextItemWidth(-1.0f);
             // InputDouble 不支持 EnterReturnsTrue（ImGui 会断言），改用
             // 「编辑结束」判定：回车或失焦均视为提交。
             ImGui::InputDouble("##level_input", &level_input, 0.0, 0.0, "%.1f");
+            item_tooltip("输入窗位，回车或失焦后生效");
             if (ImGui::IsItemDeactivatedAfterEdit())
             {
                 state->window_setting.level = level_input;
@@ -1097,10 +1336,12 @@ namespace
                 state->roi_windowed = false;
                 apply_window(state);
             }
+            item_tooltip("拖动调整窗宽；窗宽越窄，对比度越高");
             ImGui::TableSetColumnIndex(2);
             double width_input = state->window_setting.width;
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputDouble("##width_input", &width_input, 0.0, 0.0, "%.1f");
+            item_tooltip("输入窗宽，回车或失焦后生效；最小为 1");
             if (ImGui::IsItemDeactivatedAfterEdit())
             {
                 state->window_setting.width = std::max(width_input, 1.0);
@@ -1115,6 +1356,7 @@ namespace
         {
             reset_window(state);
         }
+        item_tooltip("只恢复窗值，不清除反色、方向或缩放状态");
         ImGui::SameLine();
         if (ImGui::Button("自动 p1/p99"))
         {
@@ -1122,12 +1364,13 @@ namespace
             state->roi_windowed = false;
             apply_window(state);
         }
+        item_tooltip("按整幅图像的 1% / 99% 分位数计算窗");
         ImGui::SameLine();
         if (ImGui::Button("重置图像"))
         {
             reset_image(state);
         }
-        ImGui::SetItemTooltip("清除窗值、反色、插值、方向、缩放平移和 ROI");
+        item_tooltip("清除窗值、反色、插值、方向、缩放平移和 ROI");
         if (state->image->default_window)
         {
             ImGui::SameLine();
@@ -1137,6 +1380,7 @@ namespace
                 state->roi_windowed = false;
                 apply_window(state);
             }
+            item_tooltip("使用文件自带的 WindowCenter / WindowWidth");
         }
 
         ImGui::TextDisabled("预设（按值域比例）");
@@ -1155,9 +1399,10 @@ namespace
             {
                 apply_preset(state, i);
             }
+            item_tooltip("按图像值域比例应用该预设窗");
         }
 
-        draw_histogram(state, 72.0f);
+        draw_histogram(state, 64.0f);
         ImGui::TextDisabled("直方图：高亮 = 当前窗；黄线 = p1/p99；拖动可移动窗位");
 
         ImGui::Separator();
@@ -1165,36 +1410,43 @@ namespace
         {
             state->renderer->set_invert(state->invert);
         }
+        item_tooltip("反转显示灰度，不修改原始像素");
         ImGui::SameLine();
         if (ImGui::Checkbox("双线性 (L)", &state->linear))
         {
             state->renderer->set_interpolation(state->linear);
         }
+        item_tooltip("放大时使用双线性插值，显示更平滑");
         ImGui::SameLine();
         ImGui::Checkbox("记住窗值", &state->remember_window);
+        item_tooltip("在当前会话内按图像路径记住窗值");
 
         if (ImGui::Button("适应窗口 (F)"))
         {
             fit_to_window(state);
         }
+        item_tooltip("等比缩放并居中显示整幅图像");
         ImGui::SameLine();
         if (ImGui::Button("旋转 (R)"))
         {
             state->orientation = voilut::rotate_cw(state->orientation);
             apply_orientation(state);
         }
+        item_tooltip("顺时针旋转 90°");
         ImGui::SameLine();
         if (ImGui::Button("水平翻转 (H)"))
         {
             state->orientation.flip_h = !state->orientation.flip_h;
             apply_orientation(state);
         }
+        item_tooltip("左右翻转显示方向");
         ImGui::SameLine();
         if (ImGui::Button("垂直翻转 (V)"))
         {
             state->orientation.flip_v = !state->orientation.flip_v;
             apply_orientation(state);
         }
+        item_tooltip("上下翻转显示方向");
 
         ImGui::Separator();
         if (state->roi_windowed)
@@ -1243,9 +1495,10 @@ namespace
         constexpr float kHistoryWidth = 380.0f;
         constexpr float kHistoryHeight = 260.0f;
         const ImVec2 display = ImGui::GetIO().DisplaySize;
+        const float top = ImGui::GetFrameHeight() + 4.0f;
         const float x = std::max(12.0f, display.x - kHistoryWidth - 12.0f);
-        ImGui::SetNextWindowPos(ImVec2(x, 12.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(kHistoryWidth, kHistoryHeight), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(x, top), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(kHistoryWidth, kHistoryHeight), ImGuiCond_Always);
         ImGui::Begin("操作记录");
 
         ImGui::BeginDisabled(!state->roi_done);
@@ -1253,6 +1506,7 @@ namespace
         {
             record_current_roi(state);
         }
+        item_tooltip("把当前 ROI 的原图坐标和窗值加入操作记录");
         ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::BeginDisabled(state->roi_records.empty());
@@ -1260,6 +1514,7 @@ namespace
         {
             state->roi_records.clear();
         }
+        item_tooltip("删除全部 ROI 操作记录");
         ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextDisabled("%zu 条", state->roi_records.size());
@@ -1304,7 +1559,8 @@ namespace
         const std::string text =
             std::format("L {:.0f}   W {:.0f}", state->window_setting.level,
                         state->window_setting.width);
-        const ImVec2 pos(kPanelMargin + kPanelWidth + 16.0f, 16.0f);
+        const ImVec2 pos(kPanelMargin + kPanelWidth + 16.0f,
+                         ImGui::GetFrameHeight() + 8.0f);
         for (int dx = -1; dx <= 1; ++dx)
         {
             for (int dy = -1; dy <= 1; ++dy)
@@ -1529,9 +1785,16 @@ int main(int argc, char **argv)
                 ImGui_ImplWGPU_NewFrame();
                 ImGui_ImplGlfw_NewFrame();
                 ImGui::NewFrame();
+                draw_menu_bar(&state);
                 update_hover(&state);
-                draw_panel(&state);
-                draw_roi_history(&state);
+                if (state.show_control_panel)
+                {
+                    draw_panel(&state);
+                }
+                if (state.show_history_panel)
+                {
+                    draw_roi_history(&state);
+                }
                 draw_overlay(&state);
                 ImGui::Render();
 
