@@ -39,6 +39,8 @@ voilut 把这一流程拆成可复用的库：解码 → 统计 → 定窗 → G
   常见压缩）、DICOM（GDCM，含压缩传输语法、WindowCenter/WindowWidth 标签、
   Rescale Slope/Intercept）；浮点 TIFF 与多帧/多页文件目前只显示第 1 帧
 - **Windows / Linux**：Dawn（Vulkan / D3D12）统一后端，两个平台共用同一套代码
+- **高 DPI 布局**：按系统内容缩放同步放大窗口、ImGui 样式、字体与面板固定尺寸，
+  4K/200% 下仍保持 1280×720 的逻辑布局和可读字号
 
 ---
 

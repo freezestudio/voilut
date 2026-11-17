@@ -25,8 +25,6 @@
 #include <webgpu/webgpu_glfw.h>    // wgpu::glfw::CreateSurfaceForWindow
 #include <print>
 
-#include "window.h"
-
 namespace voilut
 {
 
@@ -62,11 +60,6 @@ namespace voilut
     // ------------------------------------------------------------
     // ConfigureSurface：选择格式 + 尺寸，并绑定 Device
     // ------------------------------------------------------------
-    void Context::ConfigureSurface()
-    {
-        ConfigureSurface(kWidth, kHeight);
-    }
-
     void Context::ConfigureSurface(uint32_t width, uint32_t height)
     {
         if (!surface)

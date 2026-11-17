@@ -64,6 +64,11 @@
   `voilut_model` + `window_model_test`，秒级完成。
 - 纯计算逻辑一律放进 `voilut_model`（`imaging/src/image_model.cxx`），
   不要依赖 Dawn / 窗口系统，以便无 GPU 环境下测试。
+- 高 DPI（4K/200%）下 UI 尺寸按系统 content scale 缩放：窗口创建后调用
+  `window_ui_scale()` 放大窗口，ImGui 样式用 `ScaleAllSizes()` + `FontScaleDpi`，
+  所有 96 DPI 设计尺寸（面板宽、边距、固定列宽、直方图高度、线宽等）必须经
+  `ui_px()` 换算。新加布局常量时不要直接写物理像素，否则高 DPI 下只有一半大小。
+  Surface 初始配置必须用 `glfwGetFramebufferSize()`，不能用 `kWidth` / `kHeight`。
 - 头文件注释改动后跑 `doxygen Doxyfile`，确认无 `WARN_IF_DOC_ERROR` 报警。
 - 依赖不全时一律使用 `bash scripts/install_deps.sh`（或单独运行其中某个脚本）：
   它会安装 jinja2/markupsafe，并在网络较慢时逐个重新获取被中断的子依赖。

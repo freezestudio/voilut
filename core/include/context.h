@@ -42,13 +42,10 @@ namespace voilut
         /// @param window 目标窗口。
         void CreateSurface(GLFWwindow *window);
 
-        /// @brief 给 Surface 选择格式 / 尺寸，并和 Device 绑定（使用默认窗口尺寸）。
-        /// @pre 必须在获取 Device 之后调用。
-        void ConfigureSurface();
-
-        /// @brief 功能相同，但显式指定尺寸；窗口缩放后用它重新配置 Surface。
-        /// @param width 目标宽度（像素）。
+        /// @brief 给 Surface 选择格式 / 尺寸，并和 Device 绑定。
+        /// @param width 目标宽度（像素，使用窗口 framebuffer 尺寸）。
         /// @param height 目标高度（像素）。
+        /// @pre 必须在获取 Device 之后调用。
         void ConfigureSurface(uint32_t width, uint32_t height);
 
         /// @brief 程序退出前解绑 Surface，避免资源泄漏。
