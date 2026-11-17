@@ -24,9 +24,19 @@ namespace voilut::app
         {
             return;
         }
+        // Surface 用物理像素；视口与交互用窗口逻辑尺寸（macOS Retina 下
+        // framebuffer 是窗口的 2 倍，混用会让 ROI / 平移坐标错位）。
         state->context->ConfigureSurface(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
-        state->viewport_width = static_cast<double>(width);
-        state->viewport_height = static_cast<double>(height);
+        int window_width = 0;
+        int window_height = 0;
+        glfwGetWindowSize(window, &window_width, &window_height);
+        if (window_width <= 0 || window_height <= 0)
+        {
+            window_width = width;
+            window_height = height;
+        }
+        state->viewport_width = static_cast<double>(window_width);
+        state->viewport_height = static_cast<double>(window_height);
         state->renderer->resize(state->viewport_width, state->viewport_height);
         fit_to_window(state);
     }

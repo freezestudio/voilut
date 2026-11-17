@@ -148,9 +148,17 @@ int main(int argc, char **argv)
     int framebuffer_width = 0;
     int framebuffer_height = 0;
     glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
-    if (framebuffer_width <= 0 || framebuffer_height <= 0)
+    // 交互（鼠标 / ImGui / ROI / 视口）统一使用窗口的逻辑尺寸；framebuffer
+    // 尺寸只用于配置 Surface 与渲染目标。macOS Retina 上两者相差 2 倍，
+    // 混用会让 ROI 选区、ROI 框位置与平移速度全部错位。
+    int window_width = 0;
+    int window_height = 0;
+    glfwGetWindowSize(window, &window_width, &window_height);
+    if (framebuffer_width <= 0 || framebuffer_height <= 0 || window_width <= 0 ||
+        window_height <= 0)
     {
-        std::println("无法获取窗口 framebuffer 尺寸");
+        std::println("无法获取窗口尺寸（window {}×{}，framebuffer {}×{}）", window_width,
+                     window_height, framebuffer_width, framebuffer_height);
         glfwDestroyWindow(window);
         glfwTerminate();
         return EXIT_FAILURE;
@@ -179,8 +187,8 @@ int main(int argc, char **argv)
             state.image = &image;
             state.playlist = std::move(playlist);
             state.playlist_index = 0;
-            state.viewport_width = static_cast<double>(framebuffer_width);
-            state.viewport_height = static_cast<double>(framebuffer_height);
+            state.viewport_width = static_cast<double>(window_width);
+            state.viewport_height = static_cast<double>(window_height);
             state.ui_scale = ui_scale;
             state.invert = image.initial_invert;
             glfwSetWindowUserPointer(window, &state);
