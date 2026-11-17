@@ -95,7 +95,7 @@ $lines = @(
     "set `"VSLANG=1033`"",
     "cmake -S `"$repoRoot`" -B `"$BuildDir`" -G Ninja -DCMAKE_BUILD_TYPE=$Configuration -DVOILUT_PORTABLE=ON -DVOILUT_EMBED_SHADERS=ON -DCMAKE_TOOLCHAIN_FILE=`"$toolchain`" -DVCPKG_TARGET_TRIPLET=$Triplet -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
     "if errorlevel 1 exit /b 1",
-    "cmake --build `"$BuildDir`" --target windower window_model_test --parallel",
+    "cmake --build `"$BuildDir`" --parallel",
     "if errorlevel 1 exit /b 1",
     "ctest --test-dir `"$BuildDir`" -C $Configuration --output-on-failure",
     "if errorlevel 1 exit /b 1"
@@ -126,7 +126,7 @@ if (Test-Path $dumpbin) {
         Select-String -Pattern '^\s+([A-Za-z0-9_.-]+\.dll)\s*$' |
         ForEach-Object { $_.Matches[0].Groups[1].Value }
     $bad = $deps | Where-Object {
-        $_ -match '^(tiff|gdcm|jpeg|openjp2|libz|zlib|liblzma|libexpat|libwebp|webp|zstd|lerc|jbig|MSVCP140|VCRUNTIME140)'
+        $_ -match '^(tiff|gdcm|jpeg|openjp2|libz|zlib|liblzma|libexpat|libwebp|webp|zstd|lerc|jbig|MSVCP140|VCRUNTIME140|dxcompiler|dxil)'
     }
     if ($bad) {
         Fail ("发现非系统依赖: " + ($bad -join ", "))
