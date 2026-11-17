@@ -30,22 +30,64 @@
 #include "app_ops.h"
 #include "decode/image_decode.h"
 #include "image_model.h"
+#include "region_source.h"
 #include "image_source.h"
 
 namespace voilut::app
 {
+    namespace
+    {
+        /// @brief 超过该边长时走虚拟预览路径（与渲染器请求的纹理上限一致）。
+        constexpr uint32_t kVirtualSourceDimension = 16384;
+        /// @brief 虚拟预览纹理的最大边长（有界内存；细节由后续 phase 提供）。
+        constexpr uint32_t kVirtualPreviewDimension = 4096;
+
+        /// @brief 解码：小图全量；超大 TIFF 走区域源预览，避免分配整幅像素。
+        std::expected<voilut::DecodedImage, std::string> load_for_viewer(const std::string &path)
+        {
+            const auto kind = voilut::kind_from_name(path);
+            if (!kind)
+            {
+                return std::unexpected(std::format("无法识别的图像格式：{}", path));
+            }
+
+            if (*kind == voilut::ImageKind::Tiff)
+            {
+                if (auto source = voilut::open_region_source(path))
+                {
+                    const voilut::RegionInfo &info = (*source)->info();
+                    const uint64_t bytes_per_pixel =
+                        info.sample_type == voilut::SampleType::Float32 ? 4u : 2u;
+                    const uint64_t total_bytes = static_cast<uint64_t>(info.width) * info.height *
+                                                 info.frame_count * bytes_per_pixel;
+                    if (info.width > kVirtualSourceDimension ||
+                        info.height > kVirtualSourceDimension ||
+                        total_bytes > voilut::kMaxDecodeBytes)
+                    {
+                        auto preview = (*source)->preview(kVirtualPreviewDimension);
+                        if (preview)
+                        {
+                            return preview;
+                        }
+                        if (total_bytes > voilut::kMaxDecodeBytes)
+                        {
+                            return std::unexpected(preview.error());
+                        }
+                        // 预览失败但内存仍可承受时回退全量解码。
+                    }
+                }
+            }
+            return voilut::decode_image(path, *kind);
+        }
+    } // namespace
+
     void start_load(AppState *state, const std::string &path)
     {
         state->load_path = path;
         state->loading = true;
         GLFWwindow *window = state->window;
         state->load_future = std::async(std::launch::async, [path, window]() {
-            std::expected<voilut::DecodedImage, std::string> result =
-                std::unexpected(std::string("无法识别的图像格式：") + path);
-            if (const auto kind = voilut::kind_from_name(path))
-            {
-                result = voilut::decode_image(path, *kind);
-            }
+            auto result = load_for_viewer(path);
             if (window != nullptr)
             {
                 glfwPostEmptyEvent(); // 唤醒主循环（GLFW 允许跨线程调用）

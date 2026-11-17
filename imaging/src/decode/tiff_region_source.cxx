@@ -12,7 +12,6 @@
 #include <format>
 #include <memory>
 #include <new>
-#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -139,87 +138,6 @@ namespace voilut
             const tdir_t directories = TIFFNumberOfDirectories(tif.get());
             info.frame_count = directories > 0 ? static_cast<uint32_t>(directories) : 1;
             return info;
-        }
-
-        /// @brief 整数倍盒式降采样（预览用）。
-        std::vector<uint16_t> downsample_u16(std::span<const uint16_t> src, uint32_t sw,
-                                             uint32_t sh, uint32_t factor, uint32_t &dw,
-                                             uint32_t &dh)
-        {
-            dw = std::max(1u, sw / factor);
-            dh = std::max(1u, sh / factor);
-            std::vector<uint16_t> dst(static_cast<size_t>(dw) * dh);
-            std::vector<uint64_t> sums(dw);
-            for (uint32_t oy = 0; oy < dh; ++oy)
-            {
-                std::fill(sums.begin(), sums.end(), 0);
-                const uint32_t y0 = oy * factor;
-                const uint32_t y1 = std::min(y0 + factor, sh);
-                for (uint32_t y = y0; y < y1; ++y)
-                {
-                    const uint16_t *row = src.data() + static_cast<size_t>(y) * sw;
-                    for (uint32_t ox = 0; ox < dw; ++ox)
-                    {
-                        const uint32_t x0 = ox * factor;
-                        const uint32_t x1 = std::min(x0 + factor, sw);
-                        uint64_t sum = 0;
-                        for (uint32_t x = x0; x < x1; ++x)
-                        {
-                            sum += row[x];
-                        }
-                        sums[ox] += sum;
-                    }
-                }
-                for (uint32_t ox = 0; ox < dw; ++ox)
-                {
-                    const uint32_t x0 = ox * factor;
-                    const uint32_t x1 = std::min(x0 + factor, sw);
-                    const uint64_t count = static_cast<uint64_t>(y1 - y0) * (x1 - x0);
-                    dst[static_cast<size_t>(oy) * dw + ox] =
-                        static_cast<uint16_t>((sums[ox] + count / 2) / count);
-                }
-            }
-            return dst;
-        }
-
-        /// @brief 浮点版本的整数倍盒式降采样。
-        std::vector<float> downsample_f32(std::span<const float> src, uint32_t sw, uint32_t sh,
-                                          uint32_t factor, uint32_t &dw, uint32_t &dh)
-        {
-            dw = std::max(1u, sw / factor);
-            dh = std::max(1u, sh / factor);
-            std::vector<float> dst(static_cast<size_t>(dw) * dh);
-            std::vector<double> sums(dw);
-            for (uint32_t oy = 0; oy < dh; ++oy)
-            {
-                std::fill(sums.begin(), sums.end(), 0.0);
-                const uint32_t y0 = oy * factor;
-                const uint32_t y1 = std::min(y0 + factor, sh);
-                for (uint32_t y = y0; y < y1; ++y)
-                {
-                    const float *row = src.data() + static_cast<size_t>(y) * sw;
-                    for (uint32_t ox = 0; ox < dw; ++ox)
-                    {
-                        const uint32_t x0 = ox * factor;
-                        const uint32_t x1 = std::min(x0 + factor, sw);
-                        double sum = 0.0;
-                        for (uint32_t x = x0; x < x1; ++x)
-                        {
-                            sum += row[x];
-                        }
-                        sums[ox] += sum;
-                    }
-                }
-                for (uint32_t ox = 0; ox < dw; ++ox)
-                {
-                    const uint32_t x0 = ox * factor;
-                    const uint32_t x1 = std::min(x0 + factor, sw);
-                    const double count = static_cast<double>(y1 - y0) * (x1 - x0);
-                    dst[static_cast<size_t>(oy) * dw + ox] =
-                        static_cast<float>(sums[ox] / count);
-                }
-            }
-            return dst;
         }
 
         /// @brief TIFF 区域读取实现。
@@ -385,69 +303,277 @@ namespace voilut
 
         std::expected<DecodedImage, std::string> TiffRegionSource::preview(uint32_t max_dimension)
         {
-            // Phase 0：用现成的全量解码生成首帧预览；Phase 1 改为流式降采样。
-            auto full = decode_tiff(path_);
-            if (!full)
-            {
-                return std::unexpected(full.error());
-            }
-            const auto &source = *full;
-            const uint32_t source_width = source.meta.width;
-            const uint32_t source_height = source.meta.height;
             max_dimension = std::max(1u, max_dimension);
-            const uint32_t factor =
-                std::max(1u, (std::max(source_width, source_height) + max_dimension - 1) /
-                                 max_dimension);
-            uint32_t width = 1;
-            uint32_t height = 1;
+            const uint32_t width = info_.width;
+            const uint32_t height = info_.height;
+            const uint32_t max_side = std::max(width, height);
+            const bool is_float = info_.sample_type == SampleType::Float32;
 
             DecodedImage preview;
-            preview.name = source.name;
-            preview.pixel_type = source.pixel_type;
-            preview.initial_invert = source.initial_invert;
+            preview.name = info_.name;
+            preview.pixel_type = is_float ? DecodedImage::PixelType::Float32
+                                          : DecodedImage::PixelType::UInt16;
+            preview.initial_invert = info_.initial_invert;
             preview.scale = info_.scale;
             preview.padding = info_.padding;
             preview.modality_unit = info_.modality_unit;
 
-            if (source.pixel_type == DecodedImage::PixelType::Float32)
+            if (max_side <= max_dimension)
             {
-                std::vector<float> pixels = downsample_f32(
-                    source.frame_floats(0), source_width, source_height, factor, width, height);
-                const ImageStats stats = compute_stats_float(pixels);
-                preview.meta = {
-                    .width = width,
-                    .height = height,
-                    .bits_per_sample = info_.bits_per_sample,
-                    .samples_per_pixel = 1,
-                    .frame_count = 1,
-                    .is_float = true,
-                    .min_value = stats.min_value,
-                    .max_value = stats.max_value,
-                    .p1 = stats.p1,
-                    .p99 = stats.p99,
-                    .value_range = stats.value_range,
-                };
-                preview.float_pixels = std::move(pixels);
+                auto region = read_region(0, 0, width, height, 0);
+                if (!region)
+                {
+                    return std::unexpected(region.error());
+                }
+                if (is_float)
+                {
+                    preview.float_pixels = std::move(region->f32);
+                    const ImageStats stats = compute_stats_float(preview.float_pixels);
+                    preview.meta = {
+                        .width = width,
+                        .height = height,
+                        .bits_per_sample = info_.bits_per_sample,
+                        .samples_per_pixel = 1,
+                        .frame_count = 1,
+                        .is_float = true,
+                        .min_value = stats.min_value,
+                        .max_value = stats.max_value,
+                        .p1 = stats.p1,
+                        .p99 = stats.p99,
+                        .value_range = stats.value_range,
+                    };
+                }
+                else
+                {
+                    preview.pixels = std::move(region->u16);
+                    const ImageStats stats = compute_stats(preview.pixels);
+                    preview.meta = {
+                        .width = width,
+                        .height = height,
+                        .bits_per_sample = info_.bits_per_sample,
+                        .samples_per_pixel = 1,
+                        .frame_count = 1,
+                        .is_float = false,
+                        .min_value = stats.min_value,
+                        .max_value = stats.max_value,
+                        .p1 = stats.p1,
+                        .p99 = stats.p99,
+                        .value_range = stats.value_range,
+                    };
+                }
+                return preview;
+            }
+
+            // 流式降采样：每输出像素取最多约 4×4 个源像素求平均，不做全图分配。
+            const uint32_t scale = (max_side + max_dimension - 1) / max_dimension;
+            const uint32_t out_width = std::max(1u, width / scale);
+            const uint32_t out_height = std::max(1u, height / scale);
+            const size_t out_count = static_cast<size_t>(out_width) * out_height;
+            const uint32_t step = std::max(1u, scale / 2);
+            preview.preview_width = out_width;
+            preview.preview_height = out_height;
+
+            TiffHandle tif(open_tiff(path_), &TIFFClose);
+            if (!tif)
+            {
+                return std::unexpected(std::format("无法打开 TIFF 文件：{}", path_));
+            }
+            if (TIFFSetDirectory(tif.get(), 0) != 1)
+            {
+                return std::unexpected(std::string("无法定位 TIFF 第 0 页"));
+            }
+
+            const size_t bytes_per_pixel = info_.bits_per_sample / 8;
+            std::vector<uint16_t> counts;
+            std::vector<uint64_t> sums_u16;
+            std::vector<double> sums_f32;
+            try
+            {
+                counts.assign(out_count, 0);
+                if (is_float)
+                {
+                    sums_f32.assign(out_count, 0.0);
+                }
+                else
+                {
+                    sums_u16.assign(out_count, 0);
+                }
+            }
+            catch (const std::bad_alloc &)
+            {
+                return std::unexpected(std::string("内存不足：无法分配预览累加缓冲区"));
+            }
+
+            auto add_sample = [&](uint32_t gx, uint32_t gy, uint32_t value_u16, float value_f32) {
+                const uint32_t ox = gx / scale;
+                const uint32_t oy = gy / scale;
+                if (ox >= out_width || oy >= out_height)
+                {
+                    return;
+                }
+                const size_t index = static_cast<size_t>(oy) * out_width + ox;
+                if (is_float)
+                {
+                    sums_f32[index] += value_f32;
+                }
+                else
+                {
+                    sums_u16[index] += value_u16;
+                }
+                ++counts[index];
+            };
+
+            if (TIFFIsTiled(tif.get()))
+            {
+                uint32_t tile_width = 0;
+                uint32_t tile_height = 0;
+                if (TIFFGetField(tif.get(), TIFFTAG_TILEWIDTH, &tile_width) != 1 ||
+                    TIFFGetField(tif.get(), TIFFTAG_TILELENGTH, &tile_height) != 1 ||
+                    tile_width == 0 || tile_height == 0)
+                {
+                    return std::unexpected(std::string("TIFF 缺少有效的 tile 尺寸"));
+                }
+                const tmsize_t tile_size = TIFFTileSize(tif.get());
+                if (tile_size <= 0)
+                {
+                    return std::unexpected(std::string("TIFF tile 缓冲区尺寸异常"));
+                }
+                std::vector<uint8_t> tile(static_cast<size_t>(tile_size));
+                for (uint32_t ty = 0; ty < height; ty += tile_height)
+                {
+                    for (uint32_t tx = 0; tx < width; tx += tile_width)
+                    {
+                        if (TIFFReadTile(tif.get(), tile.data(), tx, ty, 0, 0) < 0)
+                        {
+                            return std::unexpected(
+                                std::format("读取 TIFF tile ({}, {}) 失败", tx, ty));
+                        }
+                        const uint32_t gx0 = ((tx + step - 1) / step) * step;
+                        const uint32_t gy0 = ((ty + step - 1) / step) * step;
+                        const uint32_t gx1 = std::min(tx + tile_width, width);
+                        const uint32_t gy1 = std::min(ty + tile_height, height);
+                        for (uint32_t gy = gy0; gy < gy1; gy += step)
+                        {
+                            for (uint32_t gx = gx0; gx < gx1; gx += step)
+                            {
+                                const size_t local =
+                                    (static_cast<size_t>(gy - ty) * tile_width + (gx - tx)) *
+                                    bytes_per_pixel;
+                                if (is_float)
+                                {
+                                    float value = 0.0f;
+                                    std::memcpy(&value, tile.data() + local, sizeof(value));
+                                    add_sample(gx, gy, 0, value);
+                                }
+                                else if (info_.bits_per_sample == 8)
+                                {
+                                    add_sample(gx, gy, tile[local], 0.0f);
+                                }
+                                else
+                                {
+                                    uint16_t value = 0;
+                                    std::memcpy(&value, tile.data() + local, sizeof(value));
+                                    add_sample(gx, gy, value, 0.0f);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             else
             {
-                std::vector<uint16_t> pixels = downsample_u16(
-                    source.frame_pixels(0), source_width, source_height, factor, width, height);
-                const ImageStats stats = compute_stats(pixels);
-                preview.meta = {
-                    .width = width,
-                    .height = height,
-                    .bits_per_sample = info_.bits_per_sample,
-                    .samples_per_pixel = 1,
-                    .frame_count = 1,
-                    .is_float = false,
-                    .min_value = stats.min_value,
-                    .max_value = stats.max_value,
-                    .p1 = stats.p1,
-                    .p99 = stats.p99,
-                    .value_range = stats.value_range,
-                };
-                preview.pixels = std::move(pixels);
+                const tsize_t scanline_size = TIFFScanlineSize(tif.get());
+                if (scanline_size < static_cast<tsize_t>(width * bytes_per_pixel))
+                {
+                    return std::unexpected(std::string("TIFF 扫描行尺寸异常"));
+                }
+                std::vector<uint8_t> row_buffer(static_cast<size_t>(scanline_size));
+                for (uint32_t gy = 0; gy < height; gy += step)
+                {
+                    if (TIFFReadScanline(tif.get(), row_buffer.data(), gy) < 0)
+                    {
+                        return std::unexpected(std::format("读取 TIFF 第 {} 行失败", gy));
+                    }
+                    for (uint32_t gx = 0; gx < width; gx += step)
+                    {
+                        const size_t offset = static_cast<size_t>(gx) * bytes_per_pixel;
+                        if (is_float)
+                        {
+                            float value = 0.0f;
+                            std::memcpy(&value, row_buffer.data() + offset, sizeof(value));
+                            add_sample(gx, gy, 0, value);
+                        }
+                        else if (info_.bits_per_sample == 8)
+                        {
+                            add_sample(gx, gy, row_buffer[offset], 0.0f);
+                        }
+                        else
+                        {
+                            uint16_t value = 0;
+                            std::memcpy(&value, row_buffer.data() + offset, sizeof(value));
+                            add_sample(gx, gy, value, 0.0f);
+                        }
+                    }
+                }
+            }
+
+            try
+            {
+                if (is_float)
+                {
+                    std::vector<float> pixels(out_count);
+                    for (size_t i = 0; i < out_count; ++i)
+                    {
+                        pixels[i] = counts[i] == 0
+                                        ? 0.0f
+                                        : static_cast<float>(sums_f32[i] / counts[i]);
+                    }
+                    const ImageStats stats = compute_stats_float(pixels);
+                    preview.meta = {
+                        .width = width,
+                        .height = height,
+                        .bits_per_sample = info_.bits_per_sample,
+                        .samples_per_pixel = 1,
+                        .frame_count = 1,
+                        .is_float = true,
+                        .min_value = stats.min_value,
+                        .max_value = stats.max_value,
+                        .p1 = stats.p1,
+                        .p99 = stats.p99,
+                        .value_range = stats.value_range,
+                    };
+                    preview.float_pixels = std::move(pixels);
+                }
+                else
+                {
+                    std::vector<uint16_t> pixels(out_count);
+                    for (size_t i = 0; i < out_count; ++i)
+                    {
+                        pixels[i] = counts[i] == 0
+                                        ? 0
+                                        : static_cast<uint16_t>((sums_u16[i] + counts[i] / 2) /
+                                                                counts[i]);
+                    }
+                    const ImageStats stats = compute_stats(pixels);
+                    preview.meta = {
+                        .width = width,
+                        .height = height,
+                        .bits_per_sample = info_.bits_per_sample,
+                        .samples_per_pixel = 1,
+                        .frame_count = 1,
+                        .is_float = false,
+                        .min_value = stats.min_value,
+                        .max_value = stats.max_value,
+                        .p1 = stats.p1,
+                        .p99 = stats.p99,
+                        .value_range = stats.value_range,
+                    };
+                    preview.pixels = std::move(pixels);
+                }
+            }
+            catch (const std::bad_alloc &)
+            {
+                return std::unexpected(std::string("内存不足：无法分配预览像素"));
             }
             return preview;
         }

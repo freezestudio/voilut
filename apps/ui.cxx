@@ -705,6 +705,11 @@ namespace voilut::app
                 ImGui::Text("像素 (%d, %d) = %.0f → 显示 %d", state->hover_x, state->hover_y,
                             state->hover_value, static_cast<int>(std::lround(ratio * 255.0)));
             }
+            if (state->image->preview_width != 0)
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("（预览值）");
+            }
         }
         else
         {

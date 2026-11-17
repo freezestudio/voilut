@@ -200,10 +200,12 @@ namespace
             std::printf("    错误: %s\n", preview.error().c_str());
             return;
         }
-        check(preview->meta.width <= max_dimension && preview->meta.height <= max_dimension,
-              "预览尺寸不超过上限");
-        check(preview->meta.width > 0 && preview->meta.height > 0, "预览尺寸非零");
-        const size_t expected = static_cast<size_t>(preview->meta.width) * preview->meta.height;
+        const uint32_t texture_width = preview->texture_width();
+        const uint32_t texture_height = preview->texture_height();
+        check(texture_width <= max_dimension && texture_height <= max_dimension,
+              "预览纹理尺寸不超过上限");
+        check(texture_width > 0 && texture_height > 0, "预览尺寸非零");
+        const size_t expected = static_cast<size_t>(texture_width) * texture_height;
         const size_t actual = preview->pixel_type == voilut::DecodedImage::PixelType::Float32
                                   ? preview->float_pixels.size()
                                   : preview->pixels.size();

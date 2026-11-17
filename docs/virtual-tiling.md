@@ -340,11 +340,13 @@ Phase 2 在此基础上加：
 
 ### Phase 1：预览 + 细节纹理
 
-- [ ] `DecodedImage` 增加 `source_width/source_height` / `preview_scale`；
-- [ ] `ImageRenderer` 双纹理 + 扩展 uniform + WGSL 细节采样；
+- [x] `DecodedImage` 增加 `preview_width/height`（`meta` 保留原图逻辑尺寸）；
+- [x] `ImageRenderer::upload(..., data_size)` 支持已降采样的预览纹理；
+- [x] 打开流程：超大 TIFF 走 `open_region_source` + **流式预览**（4096 边长），
+      小图仍走全量解码；
+- [x] 探针 / ROI 按原图坐标映射到预览纹理；
+- [ ] `ImageRenderer` 第二纹理（detail）+ 扩展 uniform + WGSL 细节采样；
 - [ ] `DetailController`（防抖、generation、异步）；
-- [ ] 打开流程改为 `open_region_source` + `preview`；
-- [ ] 探针/ROI/帧切换适配；
 - [ ] 验收：40000² tiled TIFF 打开 RSS 有界、100% 可读、平移 300ms 内更新。
 
 ### Phase 2：缓存与 DICOM

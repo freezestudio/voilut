@@ -125,6 +125,12 @@
 - 模态值：内部像素仍是存储域（有符号 +32768，uint16 纹理）；UI 的窗位/窗宽、探针、
   ROI 记录必须经 `ValueScale::to_modality` / `to_storage` / `width_to_*` 换算。
   `display_ratio` 与着色器继续使用存储域，不要混用。CT 的 RescaleType 会显示为 HU。
+- 大图预览路径：`DecodedImage.meta.width/height` 是**原图逻辑尺寸**，
+  `preview_width/height` 是纹理尺寸（0 表示两者相同）；像素索引用
+  `texture_width()/texture_height()`，不要用 `meta.width` 索引 `pixels`。
+  `ImageRenderer::upload(..., data_size)` 接受预览数据尺寸；`preview_scale()` 供 UI 提示。
+  当前超大 TIFF 由 `image_io::load_for_viewer` 走 `RegionSource::preview`（流式），
+  细节纹理与 DetailController 仍待实现（Phase 1b）。
 - 区域读取（虚拟切片 Phase 0）：`imaging/include/region_source.h` +
   `imaging/src/decode/tiff_region_source.cxx`。libtiff 的 `TIFFReadScanline/TIFFReadTile`
   **已经返回本机字节序**，不要再手动 `TIFFIsByteSwapped` 交换（会双重交换）；

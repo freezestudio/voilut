@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <format>
 #include <vector>
@@ -237,51 +238,77 @@ namespace voilut
         update_quad();
     }
 
-    std::expected<void, std::string> ImageRenderer::upload(uint32_t width, uint32_t height,
-                                                          std::span<const uint16_t> pixels)
+    std::expected<void, std::string> ImageRenderer::upload(
+        uint32_t image_width, uint32_t image_height, std::span<const uint16_t> pixels,
+        std::optional<std::pair<uint32_t, uint32_t>> data_size)
     {
-        if (width == 0 || height == 0)
+        if (image_width == 0 || image_height == 0)
         {
             return std::unexpected(std::string("图像尺寸为 0"));
         }
-        if (pixels.size() < static_cast<size_t>(width) * height)
-        {
-            return std::unexpected(std::string("像素数据长度不足"));
-        }
 
-        image_width_ = width;
-        image_height_ = height;
+        image_width_ = image_width;
+        image_height_ = image_height;
         preview_scale_ = 1;
         image_bind_group_ = nullptr;
 
         // 设备上限由 Context 请求（Dawn 默认只给 8192，科研图像很容易超）。
-        // 超过上限时按整数倍盒式滤波降采样成预览纹理，而不是直接报错。
+        // data_size 有值时表示调用方已给出预览纹理尺寸（虚拟切片路径）；
+        // 否则对超过上限的图像按整数倍盒式滤波降采样。
         std::span<const uint16_t> upload_pixels = pixels;
         std::vector<uint16_t> reduced;
-        uint32_t tex_width = width;
-        uint32_t tex_height = height;
-        try
+        uint32_t tex_width = image_width;
+        uint32_t tex_height = image_height;
+        if (data_size)
         {
-            if (width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+            tex_width = data_size->first;
+            tex_height = data_size->second;
+            if (tex_width == 0 || tex_height == 0 ||
+                tex_width > context_.max_texture_dimension ||
+                tex_height > context_.max_texture_dimension)
             {
-                const uint32_t factor = std::max(
-                    (width + context_.max_texture_dimension - 1) /
-                        context_.max_texture_dimension,
-                    (height + context_.max_texture_dimension - 1) /
-                        context_.max_texture_dimension);
-                uint32_t reduced_width = 1;
-                uint32_t reduced_height = 1;
-                reduced = downsample_u16(pixels, width, height, factor, reduced_width,
-                                         reduced_height);
-                upload_pixels = reduced;
-                tex_width = reduced_width;
-                tex_height = reduced_height;
-                preview_scale_ = factor;
+                return std::unexpected(std::format(
+                    "预览纹理尺寸 {}×{} 非法（上限 {}）", tex_width, tex_height,
+                    context_.max_texture_dimension));
             }
+            if (pixels.size() < static_cast<size_t>(tex_width) * tex_height)
+            {
+                return std::unexpected(std::string("预览像素数据长度不足"));
+            }
+            preview_scale_ = std::max(
+                1u, static_cast<uint32_t>(std::lround(
+                        static_cast<double>(image_width) / tex_width)));
         }
-        catch (const std::bad_alloc &)
+        else
         {
-            return std::unexpected(std::string("内存不足：生成大图预览时分配失败"));
+            if (pixels.size() < static_cast<size_t>(image_width) * image_height)
+            {
+                return std::unexpected(std::string("像素数据长度不足"));
+            }
+            try
+            {
+                if (image_width > context_.max_texture_dimension ||
+                    image_height > context_.max_texture_dimension)
+                {
+                    const uint32_t factor = std::max(
+                        (image_width + context_.max_texture_dimension - 1) /
+                            context_.max_texture_dimension,
+                        (image_height + context_.max_texture_dimension - 1) /
+                            context_.max_texture_dimension);
+                    uint32_t reduced_width = 1;
+                    uint32_t reduced_height = 1;
+                    reduced = downsample_u16(pixels, image_width, image_height, factor,
+                                             reduced_width, reduced_height);
+                    upload_pixels = reduced;
+                    tex_width = reduced_width;
+                    tex_height = reduced_height;
+                    preview_scale_ = factor;
+                }
+            }
+            catch (const std::bad_alloc &)
+            {
+                return std::unexpected(std::string("内存不足：生成大图预览时分配失败"));
+            }
         }
 
         const uint32_t level_count = mip_level_count(tex_width, tex_height);
@@ -367,49 +394,74 @@ namespace voilut
         return {};
     }
 
-    std::expected<void, std::string> ImageRenderer::upload_float(uint32_t width, uint32_t height,
-                                                                 std::span<const float> pixels)
+    std::expected<void, std::string> ImageRenderer::upload_float(
+        uint32_t image_width, uint32_t image_height, std::span<const float> pixels,
+        std::optional<std::pair<uint32_t, uint32_t>> data_size)
     {
-        if (width == 0 || height == 0)
+        if (image_width == 0 || image_height == 0)
         {
             return std::unexpected(std::string("图像尺寸为 0"));
         }
-        if (pixels.size() < static_cast<size_t>(width) * height)
-        {
-            return std::unexpected(std::string("浮点像素数据长度不足"));
-        }
 
-        image_width_ = width;
-        image_height_ = height;
+        image_width_ = image_width;
+        image_height_ = image_height;
         preview_scale_ = 1;
         image_bind_group_ = nullptr;
 
         std::span<const float> upload_pixels = pixels;
         std::vector<float> reduced;
-        uint32_t tex_width = width;
-        uint32_t tex_height = height;
-        try
+        uint32_t tex_width = image_width;
+        uint32_t tex_height = image_height;
+        if (data_size)
         {
-            if (width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+            tex_width = data_size->first;
+            tex_height = data_size->second;
+            if (tex_width == 0 || tex_height == 0 ||
+                tex_width > context_.max_texture_dimension ||
+                tex_height > context_.max_texture_dimension)
             {
-                const uint32_t factor = std::max(
-                    (width + context_.max_texture_dimension - 1) /
-                        context_.max_texture_dimension,
-                    (height + context_.max_texture_dimension - 1) /
-                        context_.max_texture_dimension);
-                uint32_t reduced_width = 1;
-                uint32_t reduced_height = 1;
-                reduced = downsample_f32(pixels, width, height, factor, reduced_width,
-                                         reduced_height);
-                upload_pixels = reduced;
-                tex_width = reduced_width;
-                tex_height = reduced_height;
-                preview_scale_ = factor;
+                return std::unexpected(std::format(
+                    "浮点预览纹理尺寸 {}×{} 非法（上限 {}）", tex_width, tex_height,
+                    context_.max_texture_dimension));
             }
+            if (pixels.size() < static_cast<size_t>(tex_width) * tex_height)
+            {
+                return std::unexpected(std::string("浮点预览像素数据长度不足"));
+            }
+            preview_scale_ = std::max(
+                1u, static_cast<uint32_t>(std::lround(
+                        static_cast<double>(image_width) / tex_width)));
         }
-        catch (const std::bad_alloc &)
+        else
         {
-            return std::unexpected(std::string("内存不足：生成浮点大图预览时分配失败"));
+            if (pixels.size() < static_cast<size_t>(image_width) * image_height)
+            {
+                return std::unexpected(std::string("浮点像素数据长度不足"));
+            }
+            try
+            {
+                if (image_width > context_.max_texture_dimension ||
+                    image_height > context_.max_texture_dimension)
+                {
+                    const uint32_t factor = std::max(
+                        (image_width + context_.max_texture_dimension - 1) /
+                            context_.max_texture_dimension,
+                        (image_height + context_.max_texture_dimension - 1) /
+                            context_.max_texture_dimension);
+                    uint32_t reduced_width = 1;
+                    uint32_t reduced_height = 1;
+                    reduced = downsample_f32(pixels, image_width, image_height, factor,
+                                             reduced_width, reduced_height);
+                    upload_pixels = reduced;
+                    tex_width = reduced_width;
+                    tex_height = reduced_height;
+                    preview_scale_ = factor;
+                }
+            }
+            catch (const std::bad_alloc &)
+            {
+                return std::unexpected(std::string("内存不足：生成浮点大图预览时分配失败"));
+            }
         }
 
         const uint32_t level_count = mip_level_count(tex_width, tex_height);

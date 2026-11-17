@@ -120,8 +120,12 @@ namespace voilut
         std::string name;                              ///< 文件名 / 数据源名。
         ImageMeta meta;                                ///< 元数据与统计（首帧）。
         PixelType pixel_type = PixelType::UInt16;      ///< 像素类型。
-        /// 16 位像素（行优先，连续存所有帧）：第 f 帧从 `f * width * height` 开始。
-        /// 单帧图像长度 = width * height。
+        /// 预览纹理的宽高；0 表示与 `meta.width/height` 相同（普通全量解码）。
+        /// 虚拟切片路径会把原图降采样成预览：`meta` 保留原图尺寸，
+        /// `pixels` / `float_pixels` 的长度按 `preview_width * preview_height` 计算。
+        uint32_t preview_width = 0;
+        uint32_t preview_height = 0;
+        /// 16 位像素（行优先，连续存所有帧）：第 f 帧从 `f * texture_width * texture_height` 开始。
         std::vector<uint16_t> pixels;
         /// 32 位浮点像素（`pixel_type == Float32` 时使用，同样连续存所有帧）。
         std::vector<float> float_pixels;
@@ -136,16 +140,32 @@ namespace voilut
         std::string modality_unit;
         bool initial_invert = false;                   ///< 初始是否反色（MONOCHROME1）。
 
+        /// @brief 预览纹理宽（普通图像等于原图宽）。
+        [[nodiscard]] uint32_t texture_width() const noexcept
+        {
+            return preview_width != 0 ? preview_width : meta.width;
+        }
+
+        /// @brief 预览纹理高（普通图像等于原图高）。
+        [[nodiscard]] uint32_t texture_height() const noexcept
+        {
+            return preview_height != 0 ? preview_height : meta.height;
+        }
+
         /// @brief 取指定帧的 16 位像素视图（越界返回空 span）。
         /// @param index 帧序号（0-based）。
         [[nodiscard]] std::span<const uint16_t> frame_pixels(uint32_t index) const noexcept
         {
             if (pixel_type != PixelType::UInt16 || index >= meta.frame_count ||
-                meta.width == 0 || meta.height == 0)
+                texture_width() == 0 || texture_height() == 0)
             {
                 return {};
             }
-            const size_t count = static_cast<size_t>(meta.width) * meta.height;
+            const size_t count = static_cast<size_t>(texture_width()) * texture_height();
+            if (pixels.size() < count * (static_cast<size_t>(index) + 1))
+            {
+                return {};
+            }
             return {pixels.data() + count * index, count};
         }
 
@@ -158,7 +178,11 @@ namespace voilut
             {
                 return {};
             }
-            const size_t count = static_cast<size_t>(meta.width) * meta.height;
+            const size_t count = static_cast<size_t>(texture_width()) * texture_height();
+            if (float_pixels.size() < count * (static_cast<size_t>(index) + 1))
+            {
+                return {};
+            }
             return {float_pixels.data() + count * index, count};
         }
     };

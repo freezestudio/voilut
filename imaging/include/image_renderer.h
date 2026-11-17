@@ -6,9 +6,11 @@
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <webgpu/webgpu_cpp.h>
 
@@ -58,25 +60,29 @@ namespace voilut
         void resize(double css_width, double css_height);
 
         /// @brief 上传 16 位像素（会重建 GPU 纹理与 mipmap 链）。
-        /// @param width 图像宽。
-        /// @param height 图像高。
+        /// @param image_width 原图逻辑宽（视口 / ROI / 探针使用）。
+        /// @param image_height 原图逻辑高。
         /// @param pixels 行优先的 16 位像素。
+        /// @param data_size 可选的预览数据尺寸（虚拟切片路径）；为空时按图像尺寸，
+        ///        超过设备上限会先降采样。
         /// @return 成功为空；内存不足时返回错误说明。
-        /// @note 超过设备纹理上限时按整数倍盒式滤波降采样后再上传，
-        ///       降采样倍数通过 `preview_scale()` 查询。
+        /// @note 预览倍数通过 `preview_scale()` 查询。
         [[nodiscard("upload 必须检查返回值")]]
-        std::expected<void, std::string> upload(uint32_t width, uint32_t height,
-                                                 std::span<const uint16_t> pixels);
+        std::expected<void, std::string> upload(
+            uint32_t image_width, uint32_t image_height, std::span<const uint16_t> pixels,
+            std::optional<std::pair<uint32_t, uint32_t>> data_size = std::nullopt);
 
         /// @brief 上传 32 位浮点像素（内部用 R32Uint 纹理存位模式，着色器 bitcast）。
-        /// @param width 图像宽。
-        /// @param height 图像高。
+        /// @param image_width 原图逻辑宽。
+        /// @param image_height 原图逻辑高。
         /// @param pixels 行优先的 32 位浮点像素（NaN / Inf 也按位存储）。
+        /// @param data_size 可选的预览数据尺寸（虚拟切片路径）。
         /// @return 成功为空；内存不足时返回错误说明。
-        /// @note 超过纹理上限时同样降采样，倍数见 `preview_scale()`。
+        /// @note 预览倍数见 `preview_scale()`。
         [[nodiscard("upload_float 必须检查返回值")]]
-        std::expected<void, std::string> upload_float(uint32_t width, uint32_t height,
-                                                      std::span<const float> pixels);
+        std::expected<void, std::string> upload_float(
+            uint32_t image_width, uint32_t image_height, std::span<const float> pixels,
+            std::optional<std::pair<uint32_t, uint32_t>> data_size = std::nullopt);
 
         /// @brief 当前纹理的降采样倍数（1 = 原始分辨率，>1 = 预览）。
         [[nodiscard]] uint32_t preview_scale() const noexcept { return preview_scale_; }

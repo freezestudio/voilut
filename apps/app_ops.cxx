@@ -56,12 +56,18 @@ namespace voilut::app
                                                   const voilut::DecodedImage &image,
                                                   uint32_t frame)
     {
+        std::optional<std::pair<uint32_t, uint32_t>> data_size;
+        if (image.preview_width != 0)
+        {
+            data_size = std::pair<uint32_t, uint32_t>{image.preview_width, image.preview_height};
+        }
         if (image.pixel_type == voilut::DecodedImage::PixelType::Float32)
         {
             return renderer.upload_float(image.meta.width, image.meta.height,
-                                         image.frame_floats(frame));
+                                         image.frame_floats(frame), data_size);
         }
-        return renderer.upload(image.meta.width, image.meta.height, image.frame_pixels(frame));
+        return renderer.upload(image.meta.width, image.meta.height, image.frame_pixels(frame),
+                               data_size);
     }
 
     /// @brief 统计指定帧（整数 / 浮点分派；整数会排除填充值）。
@@ -270,15 +276,24 @@ namespace voilut::app
         {
             return false;
         }
-        const auto setting = state->image->pixel_type == voilut::DecodedImage::PixelType::Float32
-                                 ? voilut::window_for_roi_float(
-                                       state->image->frame_floats(state->frame_index),
-                                       state->image->meta.width, state->image->meta.height,
-                                       state->roi_image)
-                                 : voilut::window_for_roi(
-                                       state->image->frame_pixels(state->frame_index),
-                                       state->image->meta.width, state->image->meta.height,
-                                       state->roi_image, state->image->padding);
+        const auto &meta = state->image->meta;
+        const uint32_t texture_width = state->image->texture_width();
+        const uint32_t texture_height = state->image->texture_height();
+        const double scale_x = static_cast<double>(texture_width) / meta.width;
+        const double scale_y = static_cast<double>(texture_height) / meta.height;
+        const voilut::Rect roi_scaled{
+            .x = state->roi_image.x * scale_x,
+            .y = state->roi_image.y * scale_y,
+            .width = state->roi_image.width * scale_x,
+            .height = state->roi_image.height * scale_y,
+        };
+        const auto setting =
+            state->image->pixel_type == voilut::DecodedImage::PixelType::Float32
+                ? voilut::window_for_roi_float(state->image->frame_floats(state->frame_index),
+                                               texture_width, texture_height, roi_scaled)
+                : voilut::window_for_roi(state->image->frame_pixels(state->frame_index),
+                                         texture_width, texture_height, roi_scaled,
+                                         state->image->padding);
         if (!setting)
         {
             return false; // 选区太小，保持当前窗
@@ -496,13 +511,18 @@ namespace voilut::app
         glfwGetCursorPos(state->window, &mouse_x, &mouse_y);
         const auto [image_x, image_y] = screen_to_original(state, mouse_x, mouse_y);
         const uint32_t frame = state->frame_index;
+        const uint32_t texture_width = state->image->texture_width();
+        const uint32_t texture_height = state->image->texture_height();
+        const double sample_x =
+            image_x * static_cast<double>(texture_width) / state->image->meta.width;
+        const double sample_y =
+            image_y * static_cast<double>(texture_height) / state->image->meta.height;
         bool valid = false;
         if (state->image->pixel_type == voilut::DecodedImage::PixelType::Float32)
         {
             const auto value = voilut::pixel_at_float(state->image->frame_floats(frame),
-                                                      state->image->meta.width,
-                                                      state->image->meta.height, image_x,
-                                                      image_y);
+                                                      texture_width, texture_height, sample_x,
+                                                      sample_y);
             if (value)
             {
                 state->hover_value = static_cast<double>(*value);
@@ -512,8 +532,8 @@ namespace voilut::app
         else
         {
             const auto value = voilut::pixel_at(state->image->frame_pixels(frame),
-                                                state->image->meta.width,
-                                                state->image->meta.height, image_x, image_y);
+                                                texture_width, texture_height, sample_x,
+                                                sample_y);
             if (value)
             {
                 state->hover_value = static_cast<double>(*value);
