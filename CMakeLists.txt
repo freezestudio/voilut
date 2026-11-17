@@ -369,6 +369,8 @@ add_library(voilut STATIC
   imaging/src/decode/image_decode.cxx
   imaging/src/decode/tiff_decode.cxx
   imaging/src/decode/tiff_region_source.cxx
+  imaging/src/decode/dicom_region_source.cxx
+  imaging/src/decode/region_source_factory.cxx
   imaging/src/decode/dicom_decode.cxx
 )
 target_include_directories(voilut PUBLIC imaging/include)

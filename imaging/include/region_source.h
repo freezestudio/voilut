@@ -92,4 +92,12 @@ namespace voilut
     /// @return 成功返回图像源；不支持的格式/损坏文件返回错误说明。
     [[nodiscard]] std::expected<std::unique_ptr<RegionSource>, std::string>
     open_region_source(const std::string &path);
+
+    /// @brief 打开 TIFF 区域源（Phase 0）。
+    [[nodiscard]] std::expected<std::unique_ptr<RegionSource>, std::string>
+    open_tiff_region_source(const std::string &path);
+
+    /// @brief 打开 DICOM 区域源（Phase 2）。
+    [[nodiscard]] std::expected<std::unique_ptr<RegionSource>, std::string>
+    open_dicom_region_source(const std::string &path);
 } // namespace voilut

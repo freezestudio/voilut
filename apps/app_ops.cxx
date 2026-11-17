@@ -707,12 +707,16 @@ namespace voilut::app
         constexpr uint32_t kDetailMax = 4096;
         const uint32_t max_width = std::min(kDetailMax, meta.width);
         const uint32_t max_height = std::min(kDetailMax, meta.height);
+        // 预取 25% 边距：小幅平移命中同一细节纹理，减少重复区域读取。
+        constexpr double kPrefetchMargin = 1.25;
         const uint32_t min_detail_width = std::min<uint32_t>(256, max_width);
         const uint32_t min_detail_height = std::min<uint32_t>(256, max_height);
         const uint32_t wanted_width = std::clamp<uint32_t>(
-            static_cast<uint32_t>(std::ceil(max_x - min_x)), min_detail_width, max_width);
+            static_cast<uint32_t>(std::ceil((max_x - min_x) * kPrefetchMargin)),
+            min_detail_width, max_width);
         const uint32_t wanted_height = std::clamp<uint32_t>(
-            static_cast<uint32_t>(std::ceil(max_y - min_y)), min_detail_height, max_height);
+            static_cast<uint32_t>(std::ceil((max_y - min_y) * kPrefetchMargin)),
+            min_detail_height, max_height);
         if (wanted_width == 0 || wanted_height == 0)
         {
             state->detail_dirty = false;

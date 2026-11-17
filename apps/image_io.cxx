@@ -51,7 +51,6 @@ namespace voilut::app
                 return std::unexpected(std::format("无法识别的图像格式：{}", path));
             }
 
-            if (*kind == voilut::ImageKind::Tiff)
             {
                 if (auto source = voilut::open_region_source(path))
                 {

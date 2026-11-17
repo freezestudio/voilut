@@ -350,10 +350,14 @@ Phase 2 在此基础上加：
 - [x] 已在 20000×2000 tiled TIFF 上验证：预览 1/5，放大后请求 256×256 细节并上传；
 - [ ] 验收：40000² tiled TIFF 打开 RSS 有界、100% 可读、平移 300ms 内更新（待大样本）。
 
-### Phase 2：缓存与 DICOM
+### Phase 2：缓存与 DICOM（进行中）
 
-- [ ] tile/region LRU 缓存、预取；
-- [ ] GDCM `ImageRegionReader` 区域解码 + 压缩回退；
+- [x] GDCM `ImageRegionReader` 区域读取（元数据用 `ReadInformation`，不加载 PixelData）；
+      未压缩与 GDCM 能按区域解码的压缩语法可用；预览暂用全量解码（≤ `kMaxDecodeBytes`）；
+- [x] 细节预取 25% 边距（小幅平移复用同一纹理）；
+- [x] 已在 20000×2000 未压缩 DICOM 上验证预览 1/5 + 放大后 256×256 细节；
+- [ ] 多区域 LRU 缓存与更远距离预取；
+- [ ] 超大 DICOM（> `kMaxDecodeBytes`）的流式预览；
 - [ ] 全图统计抽样；
 - [ ] 验收：DICOM WSI/多帧、连续平移命中缓存。
 

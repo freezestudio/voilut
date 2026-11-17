@@ -134,8 +134,10 @@
   `preview_width/height` 是纹理尺寸（0 表示两者相同）；像素索引用
   `texture_width()/texture_height()`，不要用 `meta.width` 索引 `pixels`。
   `ImageRenderer::upload(..., data_size)` 接受预览数据尺寸；`preview_scale()` 供 UI 提示。
-  当前超大 TIFF 由 `image_io::load_for_viewer` 走 `RegionSource::preview`（流式），
-  放大后由 `update_detail` 按需加载 1:1 细节（Phase 1b 已接通）。
+  当前超大 TIFF / DICOM 由 `image_io::load_for_viewer` 走 `RegionSource::preview`，
+  放大后由 `update_detail` 按需加载 1:1 细节（预取 25% 边距）。
+  DICOM 区域读取用 `gdcm::ImageRegionReader`（元数据 `ReadInformation`，不加载 PixelData）；
+  预览仍用全量解码，受 `kMaxDecodeBytes` 限制。
 - 区域读取（虚拟切片 Phase 0）：`imaging/include/region_source.h` +
   `imaging/src/decode/tiff_region_source.cxx`。libtiff 的 `TIFFReadScanline/TIFFReadTile`
   **已经返回本机字节序**，不要再手动 `TIFFIsByteSwapped` 交换（会双重交换）；

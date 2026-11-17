@@ -580,17 +580,12 @@ namespace voilut
     } // namespace
 
     std::expected<std::unique_ptr<RegionSource>, std::string>
-    open_region_source(const std::string &path)
+    open_tiff_region_source(const std::string &path)
     {
         const std::string suffix = lower_suffix(path);
-        if (suffix == "dcm" || suffix == "dicom")
-        {
-            return std::unexpected(
-                std::string("DICOM 区域读取将在后续阶段支持（当前请使用普通解码路径）"));
-        }
         if (suffix != "tif" && suffix != "tiff")
         {
-            return std::unexpected(std::format("不支持的图像格式：{}", path));
+            return std::unexpected(std::format("不是 TIFF 文件：{}", path));
         }
         auto info = read_tiff_info(path);
         if (!info)

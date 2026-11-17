@@ -237,7 +237,7 @@ int main()
             check(write_u16(tif, w, h, value), "写入扫描行");
             TIFFClose(tif);
         }
-        auto source = voilut::open_region_source(to_utf8(path));
+        auto source = voilut::open_tiff_region_source(to_utf8(path));
         check(source.has_value(), "打开区域源");
         if (source)
         {
@@ -267,7 +267,7 @@ int main()
             check(write_tiled_u16(tif, w, h, 64, value), "写入 tile");
             TIFFClose(tif);
         }
-        auto source = voilut::open_region_source(to_utf8(path));
+        auto source = voilut::open_tiff_region_source(to_utf8(path));
         check(source.has_value(), "打开区域源");
         if (source)
         {
@@ -295,7 +295,7 @@ int main()
             check(write_u16(tif, w, h, value), "写入扫描行");
             TIFFClose(tif);
         }
-        auto source = voilut::open_region_source(to_utf8(path));
+        auto source = voilut::open_tiff_region_source(to_utf8(path));
         check(source.has_value(), "打开区域源");
         if (source)
         {
@@ -320,7 +320,7 @@ int main()
             check(write_f32(tif, w, h, value), "写入扫描行");
             TIFFClose(tif);
         }
-        auto source = voilut::open_region_source(to_utf8(path));
+        auto source = voilut::open_tiff_region_source(to_utf8(path));
         check(source.has_value(), "打开区域源");
         if (source)
         {
@@ -354,7 +354,7 @@ int main()
             check(write_u16(tif, w, h, value1), "写第 2 页");
             TIFFClose(tif);
         }
-        auto source = voilut::open_region_source(to_utf8(path));
+        auto source = voilut::open_tiff_region_source(to_utf8(path));
         check(source.has_value(), "打开区域源");
         if (source)
         {
@@ -396,7 +396,7 @@ int main()
             check(ok, "写入扫描行");
             TIFFClose(tif);
         }
-        auto source = voilut::open_region_source(to_utf8(path));
+        auto source = voilut::open_tiff_region_source(to_utf8(path));
         check(source.has_value(), "打开区域源");
         if (source)
         {
@@ -425,7 +425,7 @@ int main()
             check(write_tiled_u16(tif, w, h, 16, value), "写入 tile");
             TIFFClose(tif);
         }
-        auto source = voilut::open_region_source(to_utf8(path));
+        auto source = voilut::open_tiff_region_source(to_utf8(path));
         check(source.has_value(), "打开区域源");
         if (source)
         {
