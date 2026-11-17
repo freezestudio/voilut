@@ -7,6 +7,7 @@
 #include <cmath>
 #include <format>
 #include <fstream>
+#include <print>
 #include <string>
 #include <vector>
 
@@ -265,9 +266,22 @@ namespace voilut::app
             int face;
         };
         static const FontCandidate kCandidates[] = {
+            // macOS：系统自带的中文黑体。PingFang 在部分系统版本 / 精简安装中
+            // 不存在，因此优先 STHeiti（face 1 = Heiti SC），再退到冬青黑体 /
+            // 宋体 / Arial Unicode MS。
+            {"/System/Library/Fonts/STHeiti Medium.ttc", 1},
+            {"/System/Library/Fonts/STHeiti Light.ttc", 1},
+            {"/System/Library/Fonts/Hiragino Sans GB.ttc", 0},
+            {"/System/Library/Fonts/Supplemental/Songti.ttc", 0},
+            {"/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0},
+            // Linux
             {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2},
             {"/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf", 0},
+            {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 2},
+            {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 2},
+            {"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0},
             {"/usr/share/fonts/truetype/arphic/uming.ttc", 0},
+            // Windows
             {"C:\\Windows\\Fonts\\msyh.ttc", 0},
             {"C:\\Windows\\Fonts\\msyh.ttf", 0},
             {"C:\\Windows\\Fonts\\simhei.ttf", 0},
@@ -290,6 +304,8 @@ namespace voilut::app
                 return;
             }
         }
+        // 默认字体只有拉丁字形，中文会显示成 "?"；日志里明确提示便于排查。
+        std::println("警告: 未找到中文字体，界面中文将显示为 \"?\"");
         io.Fonts->AddFontDefault();
     }
 

@@ -10,6 +10,8 @@
 #endif
 #include <windows.h>
 #include <shobjidl.h>
+#else
+#include <sys/wait.h>
 #endif
 
 #include "image_io.h"
@@ -267,8 +269,35 @@ namespace voilut::app
         }
         return result;
     }
+#elif defined(__APPLE__)
+    /// @brief macOS：调用系统自带的 AppleScript 目录选择框（无需 zenity）。
+    /// @details `choose folder` 返回 alias，`POSIX path of` 转成 `/Users/...` 形式；
+    ///          用户取消时 osascript 以非零状态退出且没有输出，按空结果处理。
+    std::string choose_directory_dialog_impl()
+    {
+        FILE *pipe =
+            popen("osascript -e 'POSIX path of (choose folder with prompt "
+                  "\"选择图像目录\")' 2>/dev/null",
+                  "r");
+        if (pipe == nullptr)
+        {
+            return {};
+        }
+        std::string result;
+        char buffer[4096];
+        while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr)
+        {
+            result += buffer;
+        }
+        (void)pclose(pipe);
+        while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+        {
+            result.pop_back();
+        }
+        return result;
+    }
 #else
-    /// @brief Linux/macOS：调用 zenity 选择目录。
+    /// @brief Linux：调用 zenity 选择目录。
     std::string choose_directory_dialog_impl()
     {
         FILE *pipe = popen("zenity --file-selection --directory --title='选择图像目录' 2>/dev/null",
@@ -283,10 +312,16 @@ namespace voilut::app
         {
             result += buffer;
         }
-        pclose(pipe);
+        const int status = pclose(pipe);
         while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
         {
             result.pop_back();
+        }
+        // 退出码 127 = 命令不存在；用户取消时 zenity 返回 1，不应报错。
+        if (result.empty() && WIFEXITED(status) && WEXITSTATUS(status) == 127)
+        {
+            std::println("警告: 未找到 zenity，无法打开目录选择框；"
+                         "请安装 zenity，或把图像 / 目录直接拖入窗口。");
         }
         return result;
     }
