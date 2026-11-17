@@ -414,7 +414,7 @@ namespace voilut
             preview.padding = source.padding;
             preview.scale = source.scale;
             preview.modality_unit = source.modality_unit;
-            const ImageStats stats = compute_stats(pixels);
+            // 全量解码已得到首帧完整统计，直接沿用（包含填充值排除）。
             preview.meta = {
                 .width = source.meta.width,
                 .height = source.meta.height,
@@ -422,11 +422,11 @@ namespace voilut
                 .samples_per_pixel = 1,
                 .frame_count = 1,
                 .is_float = false,
-                .min_value = stats.min_value,
-                .max_value = stats.max_value,
-                .p1 = stats.p1,
-                .p99 = stats.p99,
-                .value_range = stats.value_range,
+                .min_value = source.meta.min_value,
+                .max_value = source.meta.max_value,
+                .p1 = source.meta.p1,
+                .p99 = source.meta.p99,
+                .value_range = source.meta.value_range,
             };
             preview.pixels = std::move(pixels);
             return preview;

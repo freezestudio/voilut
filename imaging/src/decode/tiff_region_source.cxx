@@ -387,6 +387,11 @@ namespace voilut
             std::vector<uint16_t> counts;
             std::vector<uint64_t> sums_u16;
             std::vector<double> sums_f32;
+            // 全图抽样统计（仅整数）：直方图用于自动窗，避免只看预览像素。
+            std::vector<uint32_t> source_histogram;
+            uint32_t source_min = 65535;
+            uint32_t source_max = 0;
+            size_t source_count = 0;
             try
             {
                 counts.assign(out_count, 0);
@@ -397,6 +402,7 @@ namespace voilut
                 else
                 {
                     sums_u16.assign(out_count, 0);
+                    source_histogram.assign(65536, 0);
                 }
             }
             catch (const std::bad_alloc &)
@@ -419,6 +425,13 @@ namespace voilut
                 else
                 {
                     sums_u16[index] += value_u16;
+                    if (!info_.padding.contains(value_u16))
+                    {
+                        ++source_histogram[value_u16];
+                        source_min = std::min(source_min, value_u16);
+                        source_max = std::max(source_max, value_u16);
+                        ++source_count;
+                    }
                 }
                 ++counts[index];
             };
@@ -517,6 +530,49 @@ namespace voilut
                 }
             }
 
+            // 整数图像用全图抽样直方图计算 p1/p99；浮点仍用预览统计。
+            ImageStats sampled_stats{};
+            bool has_sampled_stats = false;
+            if (!is_float && source_count > 0)
+            {
+                const size_t rank = std::max<size_t>(1, source_count / 100);
+                uint32_t p1 = source_min;
+                uint32_t p99 = source_max;
+                bool found = false;
+                uint64_t acc = 0;
+                for (uint32_t value = 0; value < 65536; ++value)
+                {
+                    acc += source_histogram[value];
+                    if (!found && acc >= rank)
+                    {
+                        p1 = value;
+                        found = true;
+                    }
+                }
+                acc = 0;
+                for (int value = 65535; value >= 0; --value)
+                {
+                    acc += source_histogram[static_cast<size_t>(value)];
+                    if (acc >= rank)
+                    {
+                        p99 = static_cast<uint32_t>(value);
+                        break;
+                    }
+                }
+                if (p99 <= p1)
+                {
+                    p99 = p1 + 1;
+                }
+                sampled_stats = {
+                    .min_value = static_cast<double>(source_min),
+                    .max_value = static_cast<double>(source_max),
+                    .p1 = static_cast<double>(p1),
+                    .p99 = static_cast<double>(p99),
+                    .value_range = static_cast<double>(source_max - source_min),
+                };
+                has_sampled_stats = true;
+            }
+
             try
             {
                 if (is_float)
@@ -554,7 +610,8 @@ namespace voilut
                                         : static_cast<uint16_t>((sums_u16[i] + counts[i] / 2) /
                                                                 counts[i]);
                     }
-                    const ImageStats stats = compute_stats(pixels);
+                    const ImageStats stats =
+                        has_sampled_stats ? sampled_stats : compute_stats(pixels);
                     preview.meta = {
                         .width = width,
                         .height = height,

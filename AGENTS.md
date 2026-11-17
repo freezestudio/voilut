@@ -138,6 +138,8 @@
   放大后由 `update_detail` 按需加载 1:1 细节（预取 25% 边距）。
   DICOM 区域读取用 `gdcm::ImageRegionReader`（元数据 `ReadInformation`，不加载 PixelData）；
   预览仍用全量解码，受 `kMaxDecodeBytes` 限制。
+  预览的自动窗统计：TIFF 流式路径累加全图抽样直方图；DICOM 沿用全量首帧统计，
+  不要退化为只用预览像素统计（会受降采样影响）。
 - 区域读取（虚拟切片 Phase 0）：`imaging/include/region_source.h` +
   `imaging/src/decode/tiff_region_source.cxx`。libtiff 的 `TIFFReadScanline/TIFFReadTile`
   **已经返回本机字节序**，不要再手动 `TIFFIsByteSwapped` 交换（会双重交换）；
