@@ -61,9 +61,9 @@ namespace voilut
         /// @param width 图像宽。
         /// @param height 图像高。
         /// @param pixels 行优先的 16 位像素。
-        /// @return 成功为空；图像超过设备纹理上限或内存不足时返回错误说明。
-        /// @note mipmap 链由 CPU 盒式滤波生成，供缩小显示时避免锯齿（r16uint 无法
-        ///       用采样器生成 mipmap）。
+        /// @return 成功为空；内存不足时返回错误说明。
+        /// @note 超过设备纹理上限时按整数倍盒式滤波降采样后再上传，
+        ///       降采样倍数通过 `preview_scale()` 查询。
         [[nodiscard("upload 必须检查返回值")]]
         std::expected<void, std::string> upload(uint32_t width, uint32_t height,
                                                  std::span<const uint16_t> pixels);
@@ -72,10 +72,14 @@ namespace voilut
         /// @param width 图像宽。
         /// @param height 图像高。
         /// @param pixels 行优先的 32 位浮点像素（NaN / Inf 也按位存储）。
-        /// @return 成功为空；超限或内存不足时返回错误说明。
+        /// @return 成功为空；内存不足时返回错误说明。
+        /// @note 超过纹理上限时同样降采样，倍数见 `preview_scale()`。
         [[nodiscard("upload_float 必须检查返回值")]]
         std::expected<void, std::string> upload_float(uint32_t width, uint32_t height,
                                                       std::span<const float> pixels);
+
+        /// @brief 当前纹理的降采样倍数（1 = 原始分辨率，>1 = 预览）。
+        [[nodiscard]] uint32_t preview_scale() const noexcept { return preview_scale_; }
 
         /// @brief 设置窗宽窗位。
         void set_window(double level, double width);
@@ -108,8 +112,9 @@ namespace voilut
         wgpu::Texture image_texture_;         ///< 16 位图像纹理。
         wgpu::BindGroup image_bind_group_;    ///< group 1 绑定。
 
-        uint32_t image_width_ = 0;  ///< 图像宽。
-        uint32_t image_height_ = 0; ///< 图像高。
+        uint32_t image_width_ = 0;  ///< 图像宽（逻辑尺寸，可能大于纹理）。
+        uint32_t image_height_ = 0; ///< 图像高（逻辑尺寸）。
+        uint32_t preview_scale_ = 1; ///< 纹理降采样倍数（1 = 原始分辨率）。
         double css_width_ = 1.0;    ///< 视口宽（逻辑像素）。
         double css_height_ = 1.0;   ///< 视口高（逻辑像素）。
         Viewport viewport_{};       ///< 当前视口变换。

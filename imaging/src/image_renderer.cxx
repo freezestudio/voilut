@@ -97,6 +97,94 @@ namespace voilut
             }
             return dst;
         }
+
+        /// @brief 按整数倍做盒式降采样（用于超过纹理上限的大图预览）。
+        /// @param src 源像素。
+        /// @param src_width 源宽。
+        /// @param src_height 源高。
+        /// @param factor 降采样倍数（≥ 2）。
+        /// @param out_width 输出宽（`max(1, src_width/factor)`）。
+        /// @param out_height 输出高。
+        std::vector<uint16_t> downsample_u16(std::span<const uint16_t> src, uint32_t src_width,
+                                             uint32_t src_height, uint32_t factor,
+                                             uint32_t &out_width, uint32_t &out_height)
+        {
+            out_width = std::max(1u, src_width / factor);
+            out_height = std::max(1u, src_height / factor);
+            std::vector<uint16_t> dst(static_cast<size_t>(out_width) * out_height);
+            std::vector<uint64_t> sums(out_width);
+            for (uint32_t oy = 0; oy < out_height; ++oy)
+            {
+                std::fill(sums.begin(), sums.end(), 0);
+                const uint32_t y0 = oy * factor;
+                const uint32_t y1 = std::min(y0 + factor, src_height);
+                for (uint32_t y = y0; y < y1; ++y)
+                {
+                    const uint16_t *row = src.data() + static_cast<size_t>(y) * src_width;
+                    for (uint32_t ox = 0; ox < out_width; ++ox)
+                    {
+                        const uint32_t x0 = ox * factor;
+                        const uint32_t x1 = std::min(x0 + factor, src_width);
+                        uint64_t sum = 0;
+                        for (uint32_t x = x0; x < x1; ++x)
+                        {
+                            sum += row[x];
+                        }
+                        sums[ox] += sum;
+                    }
+                }
+                for (uint32_t ox = 0; ox < out_width; ++ox)
+                {
+                    const uint32_t x0 = ox * factor;
+                    const uint32_t x1 = std::min(x0 + factor, src_width);
+                    const uint64_t count = static_cast<uint64_t>(y1 - y0) * (x1 - x0);
+                    dst[static_cast<size_t>(oy) * out_width + ox] =
+                        static_cast<uint16_t>((sums[ox] + count / 2) / count);
+                }
+            }
+            return dst;
+        }
+
+        /// @brief 浮点版本的整数倍盒式降采样。
+        std::vector<float> downsample_f32(std::span<const float> src, uint32_t src_width,
+                                          uint32_t src_height, uint32_t factor,
+                                          uint32_t &out_width, uint32_t &out_height)
+        {
+            out_width = std::max(1u, src_width / factor);
+            out_height = std::max(1u, src_height / factor);
+            std::vector<float> dst(static_cast<size_t>(out_width) * out_height);
+            std::vector<double> sums(out_width);
+            for (uint32_t oy = 0; oy < out_height; ++oy)
+            {
+                std::fill(sums.begin(), sums.end(), 0.0);
+                const uint32_t y0 = oy * factor;
+                const uint32_t y1 = std::min(y0 + factor, src_height);
+                for (uint32_t y = y0; y < y1; ++y)
+                {
+                    const float *row = src.data() + static_cast<size_t>(y) * src_width;
+                    for (uint32_t ox = 0; ox < out_width; ++ox)
+                    {
+                        const uint32_t x0 = ox * factor;
+                        const uint32_t x1 = std::min(x0 + factor, src_width);
+                        double sum = 0.0;
+                        for (uint32_t x = x0; x < x1; ++x)
+                        {
+                            sum += row[x];
+                        }
+                        sums[ox] += sum;
+                    }
+                }
+                for (uint32_t ox = 0; ox < out_width; ++ox)
+                {
+                    const uint32_t x0 = ox * factor;
+                    const uint32_t x1 = std::min(x0 + factor, src_width);
+                    const double count = static_cast<double>(y1 - y0) * (x1 - x0);
+                    dst[static_cast<size_t>(oy) * out_width + ox] =
+                        static_cast<float>(sums[ox] / count);
+                }
+            }
+            return dst;
+        }
     } // namespace
 
     ImageRenderer::ImageRenderer(Context &context) : context_(context) {}
@@ -160,24 +248,47 @@ namespace voilut
         {
             return std::unexpected(std::string("像素数据长度不足"));
         }
-        // 设备上限由 Context 请求（Dawn 默认只给 8192，科研图像很容易超）。
-        if (width > context_.max_texture_dimension || height > context_.max_texture_dimension)
-        {
-            return std::unexpected(std::format(
-                "图像 {}×{} 超过设备最大纹理边长 {}（可在更高上限的 GPU 上运行，"
-                "或后续通过分块显示支持更大图像）",
-                width, height, context_.max_texture_dimension));
-        }
 
         image_width_ = width;
         image_height_ = height;
+        preview_scale_ = 1;
         image_bind_group_ = nullptr;
 
-        const uint32_t level_count = mip_level_count(width, height);
+        // 设备上限由 Context 请求（Dawn 默认只给 8192，科研图像很容易超）。
+        // 超过上限时按整数倍盒式滤波降采样成预览纹理，而不是直接报错。
+        std::span<const uint16_t> upload_pixels = pixels;
+        std::vector<uint16_t> reduced;
+        uint32_t tex_width = width;
+        uint32_t tex_height = height;
+        try
+        {
+            if (width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+            {
+                const uint32_t factor = std::max(
+                    (width + context_.max_texture_dimension - 1) /
+                        context_.max_texture_dimension,
+                    (height + context_.max_texture_dimension - 1) /
+                        context_.max_texture_dimension);
+                uint32_t reduced_width = 1;
+                uint32_t reduced_height = 1;
+                reduced = downsample_u16(pixels, width, height, factor, reduced_width,
+                                         reduced_height);
+                upload_pixels = reduced;
+                tex_width = reduced_width;
+                tex_height = reduced_height;
+                preview_scale_ = factor;
+            }
+        }
+        catch (const std::bad_alloc &)
+        {
+            return std::unexpected(std::string("内存不足：生成大图预览时分配失败"));
+        }
+
+        const uint32_t level_count = mip_level_count(tex_width, tex_height);
         wgpu::TextureDescriptor texDesc{
             .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
             .dimension = wgpu::TextureDimension::e2D,
-            .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
+            .size = {.width = tex_width, .height = tex_height, .depthOrArrayLayers = 1},
             .format = kImageFormat,
             .mipLevelCount = level_count,
             .sampleCount = 1,
@@ -187,24 +298,24 @@ namespace voilut
         {
             image_texture_ = context_.device.CreateTexture(&texDesc);
 
-            // 第 0 层直接写原图；其后每层由上一层 2×2 盒式滤波得到。
+            // 第 0 层直接写（可能是降采样后的）原图；其后每层由上一层 2×2 盒式滤波得到。
             {
                 const wgpu::TexelCopyTextureInfo destination{.texture = image_texture_};
                 const wgpu::TexelCopyBufferLayout layout{
                     .offset = 0,
-                    .bytesPerRow = width * 2,
-                    .rowsPerImage = height,
+                    .bytesPerRow = tex_width * 2,
+                    .rowsPerImage = tex_height,
                 };
                 const wgpu::Extent3D write_size{
-                    .width = width, .height = height, .depthOrArrayLayers = 1};
-                context_.device.GetQueue().WriteTexture(&destination, pixels.data(),
-                                                        pixels.size() * sizeof(uint16_t), &layout,
-                                                        &write_size);
+                    .width = tex_width, .height = tex_height, .depthOrArrayLayers = 1};
+                context_.device.GetQueue().WriteTexture(&destination, upload_pixels.data(),
+                                                        upload_pixels.size() * sizeof(uint16_t),
+                                                        &layout, &write_size);
             }
 
-            std::span<const uint16_t> source = pixels;
-            uint32_t source_width = width;
-            uint32_t source_height = height;
+            std::span<const uint16_t> source = upload_pixels;
+            uint32_t source_width = tex_width;
+            uint32_t source_height = tex_height;
             std::vector<uint16_t> level_pixels;
             for (uint32_t level = 1; level < level_count; ++level)
             {
@@ -267,22 +378,45 @@ namespace voilut
         {
             return std::unexpected(std::string("浮点像素数据长度不足"));
         }
-        if (width > context_.max_texture_dimension || height > context_.max_texture_dimension)
-        {
-            return std::unexpected(std::format(
-                "浮点图像 {}×{} 超过设备最大纹理边长 {}（需要分块显示）", width, height,
-                context_.max_texture_dimension));
-        }
 
         image_width_ = width;
         image_height_ = height;
+        preview_scale_ = 1;
         image_bind_group_ = nullptr;
 
-        const uint32_t level_count = mip_level_count(width, height);
+        std::span<const float> upload_pixels = pixels;
+        std::vector<float> reduced;
+        uint32_t tex_width = width;
+        uint32_t tex_height = height;
+        try
+        {
+            if (width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+            {
+                const uint32_t factor = std::max(
+                    (width + context_.max_texture_dimension - 1) /
+                        context_.max_texture_dimension,
+                    (height + context_.max_texture_dimension - 1) /
+                        context_.max_texture_dimension);
+                uint32_t reduced_width = 1;
+                uint32_t reduced_height = 1;
+                reduced = downsample_f32(pixels, width, height, factor, reduced_width,
+                                         reduced_height);
+                upload_pixels = reduced;
+                tex_width = reduced_width;
+                tex_height = reduced_height;
+                preview_scale_ = factor;
+            }
+        }
+        catch (const std::bad_alloc &)
+        {
+            return std::unexpected(std::string("内存不足：生成浮点大图预览时分配失败"));
+        }
+
+        const uint32_t level_count = mip_level_count(tex_width, tex_height);
         wgpu::TextureDescriptor texDesc{
             .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
             .dimension = wgpu::TextureDimension::e2D,
-            .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
+            .size = {.width = tex_width, .height = tex_height, .depthOrArrayLayers = 1},
             .format = kFloatImageFormat,
             .mipLevelCount = level_count,
             .sampleCount = 1,
@@ -296,19 +430,19 @@ namespace voilut
                 const wgpu::TexelCopyTextureInfo destination{.texture = image_texture_};
                 const wgpu::TexelCopyBufferLayout layout{
                     .offset = 0,
-                    .bytesPerRow = width * static_cast<uint32_t>(sizeof(float)),
-                    .rowsPerImage = height,
+                    .bytesPerRow = tex_width * static_cast<uint32_t>(sizeof(float)),
+                    .rowsPerImage = tex_height,
                 };
                 const wgpu::Extent3D write_size{
-                    .width = width, .height = height, .depthOrArrayLayers = 1};
+                    .width = tex_width, .height = tex_height, .depthOrArrayLayers = 1};
                 context_.device.GetQueue().WriteTexture(
-                    &destination, pixels.data(), pixels.size() * sizeof(float), &layout,
-                    &write_size);
+                    &destination, upload_pixels.data(), upload_pixels.size() * sizeof(float),
+                    &layout, &write_size);
             }
 
-            std::span<const float> source = pixels;
-            uint32_t source_width = width;
-            uint32_t source_height = height;
+            std::span<const float> source = upload_pixels;
+            uint32_t source_width = tex_width;
+            uint32_t source_height = tex_height;
             std::vector<float> level_pixels;
             for (uint32_t level = 1; level < level_count; ++level)
             {

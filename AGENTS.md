@@ -98,7 +98,10 @@
   简化公式（默认）与 DICOM 精确公式（C.11.2.1.2.1）。改公式必须同时改
   `display_ratio` 与 WGSL，并在 `tests/window_model_test.cxx` 覆盖两种模式。
 - 大图：`Context` 向 adapter 请求 `min(adapter.maxTextureDimension2D, 16384)`；
-  `ImageRenderer::upload` 返回 `expected`，超限/内存不足必须走错误弹窗，不得忽略。
+  `ImageRenderer::upload` 返回 `expected`。超过纹理上限时 `upload` 内部按整数倍
+  盒式滤波降采样成预览纹理（`preview_scale()` 供 UI 提示），不要改回“直接报错”
+  或静默空白；内存不足仍必须走错误弹窗。
+  真正的分块/虚拟切片（>16k 仍能 1:1 查看细节）尚未实现。
 - mipmap 由 CPU 盒式滤波生成（`r16uint` 不能由采样器生成），着色器按 UV 导数选 LOD；
   缩图质量依赖这条链，不要回退成只读 level 0。
 - TIFF：tiled、多页（逐页解码并校验尺寸）、大端字节交换、`PHOTOMETRIC_MINISWHITE`；

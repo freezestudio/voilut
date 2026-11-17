@@ -522,6 +522,12 @@ namespace
         {
             title += std::format("（帧 {}/{}）", state->frame_index + 1, count);
         }
+        const uint32_t preview =
+            state->renderer != nullptr ? state->renderer->preview_scale() : 1;
+        if (preview > 1)
+        {
+            title += std::format("（预览 1/{}）", preview);
+        }
         glfwSetWindowTitle(state->window, title.c_str());
     }
 
@@ -607,6 +613,11 @@ namespace
         if (meta.frame_count > 1)
         {
             std::println("多帧/多页文件：共 {} 帧，可用 , / . 或面板滑块切换", meta.frame_count);
+        }
+        if (state->renderer->preview_scale() > 1)
+        {
+            std::println("大图预览：按 1/{} 降采样显示（放大不会恢复原始像素）",
+                         state->renderer->preview_scale());
         }
     }
 
@@ -1554,6 +1565,11 @@ namespace
                                 meta.max_value);
         }
         const char *value_format = meta.is_float ? "%.4g" : "%.0f";
+        if (state->renderer->preview_scale() > 1)
+        {
+            ImGui::TextDisabled("预览：纹理降采样 1/%u（放大不会恢复原始像素）",
+                                state->renderer->preview_scale());
+        }
 
         if (meta.frame_count > 1)
         {
