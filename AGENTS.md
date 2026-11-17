@@ -98,8 +98,8 @@
 
 ## 窗宽窗位映射与显示
 
-- `WindowParams`（64 字节）与 `shaders/image.wgsl` 逐字段一致；前 8 个 float 之后是
-  细节区域、原图尺寸与 `detail_enabled`；`mode` 字段区分
+- `WindowParams`（128 字节）与 `shaders/image.wgsl` 逐字段一致；前 8 个 float 之后是
+  4 个细节矩形、4 个层号、原图尺寸；`mode` 字段区分
   简化公式（默认）与 DICOM 精确公式（C.11.2.1.2.1）。改公式必须同时改
   `display_ratio` 与 WGSL，并在 `tests/window_model_test.cxx` 覆盖两种模式。
 - 大图：`Context` 向 adapter 请求 `min(adapter.maxTextureDimension2D, 16384)`；
@@ -126,10 +126,11 @@
 - 模态值：内部像素仍是存储域（有符号 +32768，uint16 纹理）；UI 的窗位/窗宽、探针、
   ROI 记录必须经 `ValueScale::to_modality` / `to_storage` / `width_to_*` 换算。
   `display_ratio` 与着色器继续使用存储域，不要混用。CT 的 RescaleType 会显示为 HU。
-- 细节纹理：`ImageRenderer::upload_detail` 写 group 2（未启用时绑定 1×1 占位纹理），
-  shader 用 `source_size` + `detail_rect` 判断并采样；`update_detail` 在视口停止变化
-  120 ms 后启动后台 `RegionSource::read_region`。按需渲染下 detail_dirty 时主循环必须
-  用 `glfwWaitEventsTimeout`（否则阻塞在 WaitEvents，防抖到期后不再触发）。
+- 细节纹理：group 2 是 **4 层 2048² 纹理数组**（R32Uint），`update_detail` 在视口
+  停止变化 120 ms 后后台 `read_region`，完成后选空层或 LRU 写入；`set_detail_entries`
+  把有效矩形/层号写进 uniform，shader 按 `source_size` 判断并采样。
+  按需渲染下 detail_dirty 时主循环必须用 `glfwWaitEventsTimeout`（否则阻塞在
+  WaitEvents，防抖到期后不再触发）。
 - 大图预览路径：`DecodedImage.meta.width/height` 是**原图逻辑尺寸**，
   `preview_width/height` 是纹理尺寸（0 表示两者相同）；像素索引用
   `texture_width()/texture_height()`，不要用 `meta.width` 索引 `pixels`。

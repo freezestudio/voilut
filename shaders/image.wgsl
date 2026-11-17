@@ -25,15 +25,15 @@ struct WindowParams {
   mode: f32,      // 映射公式：0 = 简化，1 = DICOM 精确（C.11.2.1.2.1）
   value_type: f32, // 像素类型：0 = uint16，1 = float32（R32Uint 存位模式）
   _pad0: f32,
-  detail_rect: vec4<f32>, // 细节区域（原图像素坐标）
-  source_size: vec2<f32>, // 原图逻辑尺寸
-  detail_enabled: f32,    // >0.5 时在细节区域内采样 detail 纹理
-  _pad1: f32,
+  detail_rects: array<vec4<f32>, 4>, // 细节区域（原图像素坐标 x,y,w,h）
+  detail_layers: vec4<f32>,          // 每层对应的纹理数组层号（<0 无效）
+  source_size: vec2<f32>,            // 原图逻辑尺寸
+  _pad1: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> params: WindowParams;
 @group(1) @binding(0) var image: texture_2d<u32>;
-@group(2) @binding(0) var detail: texture_2d<u32>;
+@group(2) @binding(0) var detail: texture_2d_array<u32>;
 
 struct VSOut {
   @builtin(position) position: vec4<f32>,
@@ -113,8 +113,8 @@ fn sampleBilinear(uv: vec2<f32>, lod: i32) -> f32 {
 }
 
 // 读取细节纹理的值（1:1，无 mipmap）。
-fn load_detail_value(coord: vec2<i32>) -> f32 {
-  let raw = textureLoad(detail, coord, 0).r;
+fn load_detail_value(coord: vec2<i32>, layer: i32) -> f32 {
+  let raw = textureLoad(detail, coord, layer, 0).r;
   if (params.value_type > 0.5) {
     return bitcast<f32>(raw);
   }
@@ -122,7 +122,7 @@ fn load_detail_value(coord: vec2<i32>) -> f32 {
 }
 
 // 细节区域采样：最近邻 / 双线性。
-fn sample_detail(uv: vec2<f32>) -> f32 {
+fn sample_detail(uv: vec2<f32>, layer: i32) -> f32 {
   let size = vec2<i32>(textureDimensions(detail, 0));
   if (params.linear > 0.5) {
     let p = vec2<f32>(size) * uv - vec2<f32>(0.5);
@@ -130,14 +130,14 @@ fn sample_detail(uv: vec2<f32>) -> f32 {
     let frac = p - floor(p);
     let lo = clamp(base, vec2<i32>(0), size - vec2<i32>(1));
     let hi = clamp(base + vec2<i32>(1), vec2<i32>(0), size - vec2<i32>(1));
-    let v00 = load_detail_value(vec2<i32>(lo.x, lo.y));
-    let v10 = load_detail_value(vec2<i32>(hi.x, lo.y));
-    let v01 = load_detail_value(vec2<i32>(lo.x, hi.y));
-    let v11 = load_detail_value(vec2<i32>(hi.x, hi.y));
+    let v00 = load_detail_value(vec2<i32>(lo.x, lo.y), layer);
+    let v10 = load_detail_value(vec2<i32>(hi.x, lo.y), layer);
+    let v01 = load_detail_value(vec2<i32>(lo.x, hi.y), layer);
+    let v11 = load_detail_value(vec2<i32>(hi.x, hi.y), layer);
     return mix(mix(v00, v10, frac.x), mix(v01, v11, frac.x), frac.y);
   }
   let coord = clamp(vec2<i32>(vec2<f32>(size) * uv), vec2<i32>(0), size - vec2<i32>(1));
-  return load_detail_value(coord);
+  return load_detail_value(coord, layer);
 }
 
 @fragment
@@ -147,20 +147,30 @@ fn fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   // dpdx/dpdy 必须在统一控制流中调用，因此先无条件计算预览 LOD。
   let preview_lod = select_lod(image_uv);
   let source_px = image_uv * params.source_size;
-  let detail_min = params.detail_rect.xy;
-  let detail_max = detail_min + params.detail_rect.zw;
-  let use_detail = params.detail_enabled > 0.5 &&
-      source_px.x >= detail_min.x && source_px.x < detail_max.x &&
-      source_px.y >= detail_min.y && source_px.y < detail_max.y;
 
   var value: f32;
-  if (use_detail) {
-    let detail_uv = (source_px - detail_min) / params.detail_rect.zw;
-    value = sample_detail(detail_uv);
-  } else if (params.linear > 0.5) {
-    value = sampleBilinear(image_uv, preview_lod);
-  } else {
-    value = sampleNearest(image_uv, preview_lod);
+  var used_detail = false;
+  for (var i = 0; i < 4; i = i + 1) {
+    let layer = params.detail_layers[i];
+    if (layer >= 0.0) {
+      let rect = params.detail_rects[i];
+      let detail_min = rect.xy;
+      let detail_max = detail_min + rect.zw;
+      if (source_px.x >= detail_min.x && source_px.x < detail_max.x &&
+          source_px.y >= detail_min.y && source_px.y < detail_max.y) {
+        let detail_uv = (source_px - detail_min) / rect.zw;
+        value = sample_detail(detail_uv, i32(layer));
+        used_detail = true;
+        break;
+      }
+    }
+  }
+  if (!used_detail) {
+    if (params.linear > 0.5) {
+      value = sampleBilinear(image_uv, preview_lod);
+    } else {
+      value = sampleNearest(image_uv, preview_lod);
+    }
   }
   // 窗宽窗位映射：两种公式都必须与 C++ 侧 voilut::display_ratio 完全一致。
   var mapped: f32;

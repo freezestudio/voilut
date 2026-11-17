@@ -229,33 +229,31 @@ namespace voilut
         // 缓冲创建完成后再创建管线（create_pipelines 会引用 params_buffer_）
         create_pipelines(wgsl.value());
 
-        // 未启用细节时的 1×1 占位纹理：group 2 必须始终有绑定。
+        // 细节纹理数组：固定 4 层，每层 2048²，R32Uint（uint16 数值或 float 位模式）。
         {
             wgpu::TextureDescriptor desc{
                 .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
                 .dimension = wgpu::TextureDimension::e2D,
-                .size = {.width = 1, .height = 1, .depthOrArrayLayers = 1},
-                .format = kImageFormat,
+                .size = {.width = kDetailLayerSize,
+                         .height = kDetailLayerSize,
+                         .depthOrArrayLayers = kDetailLayerCount},
+                .format = kFloatImageFormat,
                 .mipLevelCount = 1,
                 .sampleCount = 1,
             };
-            dummy_detail_texture_ = context_.device.CreateTexture(&desc);
-            const uint16_t zero = 0;
-            const wgpu::TexelCopyBufferLayout layout{
-                .offset = 0, .bytesPerRow = 2, .rowsPerImage = 1};
-            const wgpu::Extent3D size{.width = 1, .height = 1, .depthOrArrayLayers = 1};
-            const wgpu::TexelCopyTextureInfo destination{.texture = dummy_detail_texture_};
-            context_.device.GetQueue().WriteTexture(&destination, &zero, sizeof(zero), &layout,
-                                                    &size);
+            detail_texture_ = context_.device.CreateTexture(&desc);
+            const wgpu::TextureViewDescriptor view_desc{
+                .dimension = wgpu::TextureViewDimension::e2DArray,
+            };
             const wgpu::BindGroupEntry entry{.binding = 0,
-                                             .textureView = dummy_detail_texture_.CreateView()};
+                                             .textureView = detail_texture_.CreateView(&view_desc)};
             const wgpu::BindGroupDescriptor bg_desc{
                 .layout = image_pipeline_.GetBindGroupLayout(2),
                 .entryCount = 1,
                 .entries = &entry,
             };
-            dummy_detail_bind_group_ = context_.device.CreateBindGroup(&bg_desc);
-            detail_bind_group_ = dummy_detail_bind_group_;
+            detail_bind_group_ = context_.device.CreateBindGroup(&bg_desc);
+            clear_detail();
         }
         return {};
     }
@@ -282,7 +280,7 @@ namespace voilut
         image_bind_group_ = nullptr;
         params_.source_width = static_cast<float>(image_width);
         params_.source_height = static_cast<float>(image_height);
-        reset_detail_binding();
+        clear_detail();
 
         // 设备上限由 Context 请求（Dawn 默认只给 8192，科研图像很容易超）。
         // data_size 有值时表示调用方已给出预览纹理尺寸（虚拟切片路径）；
@@ -441,7 +439,7 @@ namespace voilut
         image_bind_group_ = nullptr;
         params_.source_width = static_cast<float>(image_width);
         params_.source_height = static_cast<float>(image_height);
-        reset_detail_binding();
+        clear_detail();
 
         std::span<const float> upload_pixels = pixels;
         std::vector<float> reduced;
@@ -583,77 +581,67 @@ namespace voilut
     }
 
     std::expected<void, std::string> ImageRenderer::upload_detail(
-        uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+        uint32_t layer, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
         std::span<const uint16_t> pixels)
     {
-        if (width == 0 || height == 0 ||
-            width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+        (void)x;
+        (void)y;
+        if (layer >= kDetailLayerCount)
         {
-            return std::unexpected(std::format("细节区域尺寸 {}×{} 非法（上限 {}）", width, height,
-                                               context_.max_texture_dimension));
+            return std::unexpected(std::format("细节层号越界：{}", layer));
+        }
+        if (width == 0 || height == 0 || width > kDetailLayerSize || height > kDetailLayerSize)
+        {
+            return std::unexpected(
+                std::format("细节区域尺寸 {}×{} 非法（上限 {}）", width, height, kDetailLayerSize));
         }
         if (pixels.size() < static_cast<size_t>(width) * height)
         {
             return std::unexpected(std::string("细节像素数据长度不足"));
         }
-        wgpu::TextureDescriptor desc{
-            .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
-            .dimension = wgpu::TextureDimension::e2D,
-            .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
-            .format = kImageFormat,
-            .mipLevelCount = 1,
-            .sampleCount = 1,
+        std::vector<uint32_t> packed(static_cast<size_t>(width) * height);
+        for (size_t i = 0; i < packed.size(); ++i)
+        {
+            packed[i] = pixels[i];
+        }
+        const wgpu::TexelCopyTextureInfo destination{
+            .texture = detail_texture_,
+            .origin = {0, 0, layer},
         };
-        detail_texture_ = context_.device.CreateTexture(&desc);
-        const wgpu::TexelCopyTextureInfo destination{.texture = detail_texture_};
         const wgpu::TexelCopyBufferLayout layout{
             .offset = 0,
-            .bytesPerRow = width * 2,
+            .bytesPerRow = width * static_cast<uint32_t>(sizeof(uint32_t)),
             .rowsPerImage = height,
         };
         const wgpu::Extent3D size{.width = width, .height = height, .depthOrArrayLayers = 1};
-        context_.device.GetQueue().WriteTexture(&destination, pixels.data(),
-                                                pixels.size() * sizeof(uint16_t), &layout, &size);
-
-        const wgpu::BindGroupEntry entry{.binding = 0,
-                                         .textureView = detail_texture_.CreateView()};
-        const wgpu::BindGroupDescriptor bg_desc{
-            .layout = image_pipeline_.GetBindGroupLayout(2),
-            .entryCount = 1,
-            .entries = &entry,
-        };
-        detail_bind_group_ = context_.device.CreateBindGroup(&bg_desc);
-        params_.detail_x = static_cast<float>(x);
-        params_.detail_y = static_cast<float>(y);
-        params_.detail_width = static_cast<float>(width);
-        params_.detail_height = static_cast<float>(height);
-        params_.detail_enabled = 1.0f;
+        context_.device.GetQueue().WriteTexture(&destination, packed.data(),
+                                                packed.size() * sizeof(uint32_t), &layout, &size);
         return {};
     }
 
     std::expected<void, std::string> ImageRenderer::upload_detail_float(
-        uint32_t x, uint32_t y, uint32_t width, uint32_t height, std::span<const float> pixels)
+        uint32_t layer, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+        std::span<const float> pixels)
     {
-        if (width == 0 || height == 0 ||
-            width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+        (void)x;
+        (void)y;
+        if (layer >= kDetailLayerCount)
         {
-            return std::unexpected(std::format("浮点细节区域尺寸 {}×{} 非法（上限 {}）", width,
-                                               height, context_.max_texture_dimension));
+            return std::unexpected(std::format("细节层号越界：{}", layer));
+        }
+        if (width == 0 || height == 0 || width > kDetailLayerSize || height > kDetailLayerSize)
+        {
+            return std::unexpected(
+                std::format("浮点细节区域尺寸 {}×{} 非法（上限 {}）", width, height, kDetailLayerSize));
         }
         if (pixels.size() < static_cast<size_t>(width) * height)
         {
             return std::unexpected(std::string("浮点细节像素数据长度不足"));
         }
-        wgpu::TextureDescriptor desc{
-            .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
-            .dimension = wgpu::TextureDimension::e2D,
-            .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
-            .format = kFloatImageFormat,
-            .mipLevelCount = 1,
-            .sampleCount = 1,
+        const wgpu::TexelCopyTextureInfo destination{
+            .texture = detail_texture_,
+            .origin = {0, 0, layer},
         };
-        detail_texture_ = context_.device.CreateTexture(&desc);
-        const wgpu::TexelCopyTextureInfo destination{.texture = detail_texture_};
         const wgpu::TexelCopyBufferLayout layout{
             .offset = 0,
             .bytesPerRow = width * static_cast<uint32_t>(sizeof(float)),
@@ -662,34 +650,41 @@ namespace voilut
         const wgpu::Extent3D size{.width = width, .height = height, .depthOrArrayLayers = 1};
         context_.device.GetQueue().WriteTexture(&destination, pixels.data(),
                                                 pixels.size() * sizeof(float), &layout, &size);
-
-        const wgpu::BindGroupEntry entry{.binding = 0,
-                                         .textureView = detail_texture_.CreateView()};
-        const wgpu::BindGroupDescriptor bg_desc{
-            .layout = image_pipeline_.GetBindGroupLayout(2),
-            .entryCount = 1,
-            .entries = &entry,
-        };
-        detail_bind_group_ = context_.device.CreateBindGroup(&bg_desc);
-        params_.detail_x = static_cast<float>(x);
-        params_.detail_y = static_cast<float>(y);
-        params_.detail_width = static_cast<float>(width);
-        params_.detail_height = static_cast<float>(height);
-        params_.detail_enabled = 1.0f;
         return {};
+    }
+
+    void ImageRenderer::set_detail_entries(std::span<const DetailLayer> entries)
+    {
+        for (uint32_t i = 0; i < kDetailLayerCount; ++i)
+        {
+            params_.detail_layers[i] = -1.0f;
+            for (uint32_t j = 0; j < 4; ++j)
+            {
+                params_.detail_rects[i][j] = 0.0f;
+            }
+        }
+        for (size_t i = 0; i < entries.size() && i < kDetailLayerCount; ++i)
+        {
+            const DetailLayer &entry = entries[i];
+            if (entry.layer < 0 || entry.width == 0 || entry.height == 0)
+            {
+                continue;
+            }
+            params_.detail_layers[i] = static_cast<float>(entry.layer);
+            params_.detail_rects[i][0] = static_cast<float>(entry.x);
+            params_.detail_rects[i][1] = static_cast<float>(entry.y);
+            params_.detail_rects[i][2] = static_cast<float>(entry.width);
+            params_.detail_rects[i][3] = static_cast<float>(entry.height);
+        }
     }
 
     void ImageRenderer::clear_detail()
     {
-        reset_detail_binding();
+        for (uint32_t i = 0; i < kDetailLayerCount; ++i)
+        {
+            params_.detail_layers[i] = -1.0f;
+        }
     }
-
-    void ImageRenderer::reset_detail_binding()
-    {
-        detail_bind_group_ = dummy_detail_bind_group_;
-        params_.detail_enabled = 0.0f;
-    }
-
     void ImageRenderer::set_window(double level, double width)
     {
         params_.level = static_cast<float>(level);
@@ -767,8 +762,18 @@ namespace voilut
         wgpu::BindGroupLayout textureLayout =
             context_.device.CreateBindGroupLayout(&textureLayoutDesc);
 
+        wgpu::BindGroupLayoutEntry detailTextureEntry{
+            .binding = 0,
+            .visibility = wgpu::ShaderStage::Fragment,
+            .texture = {.sampleType = wgpu::TextureSampleType::Uint,
+                        .viewDimension = wgpu::TextureViewDimension::e2DArray},
+        };
+        wgpu::BindGroupLayoutDescriptor detailTextureLayoutDesc{
+            .entryCount = 1, .entries = &detailTextureEntry};
+        wgpu::BindGroupLayout detailTextureLayout =
+            context_.device.CreateBindGroupLayout(&detailTextureLayoutDesc);
         const std::array<wgpu::BindGroupLayout, 3> layouts = {uniformLayout, textureLayout,
-                                                               textureLayout};
+                                                               detailTextureLayout};
         wgpu::PipelineLayoutDescriptor layoutDesc{
             .bindGroupLayoutCount = layouts.size(),
             .bindGroupLayouts = layouts.data(),

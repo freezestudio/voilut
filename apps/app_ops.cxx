@@ -375,6 +375,8 @@ namespace voilut::app
         state->detail_loaded = {};
         state->detail_loaded_frame = 0;
         state->detail_request = {};
+        state->detail_cache = {};
+        state->detail_clock = 0;
         state->renderer->clear_detail();
 
         const voilut::ImageMeta &meta = state->image->meta;
@@ -574,6 +576,80 @@ namespace voilut::app
         }
     }
 
+    namespace
+    {
+        /// @brief 把当前缓存中的有效层写进渲染器 uniform。
+        void sync_detail_entries(AppState *state)
+        {
+            std::array<voilut::DetailLayer, voilut::ImageRenderer::kDetailLayerCount> entries{};
+            size_t count = 0;
+            const bool active = state->image != nullptr && state->region_source != nullptr &&
+                                state->detail_enabled && !state->loading &&
+                                state->viewport.scale >= 0.75;
+            if (active)
+            {
+                for (const DetailCacheEntry &entry : state->detail_cache)
+                {
+                    if (!entry.valid || entry.layer < 0 || entry.frame != state->frame_index)
+                    {
+                        continue;
+                    }
+                    entries[count++] = voilut::DetailLayer{
+                        .x = static_cast<uint32_t>(entry.rect.x),
+                        .y = static_cast<uint32_t>(entry.rect.y),
+                        .width = static_cast<uint32_t>(entry.rect.width),
+                        .height = static_cast<uint32_t>(entry.rect.height),
+                        .layer = entry.layer,
+                    };
+                }
+            }
+            state->renderer->set_detail_entries(
+                std::span<const voilut::DetailLayer>(entries.data(), count));
+        }
+
+        /// @brief 选一个细节层：优先空层，否则 LRU。
+        int32_t pick_detail_layer(const AppState *state)
+        {
+            int32_t free_layer = -1;
+            int32_t lru_layer = 0;
+            uint64_t oldest = UINT64_MAX;
+            for (size_t i = 0; i < state->detail_cache.size(); ++i)
+            {
+                const DetailCacheEntry &entry = state->detail_cache[i];
+                if (!entry.valid)
+                {
+                    free_layer = static_cast<int32_t>(i);
+                    break;
+                }
+                if (entry.last_used < oldest)
+                {
+                    oldest = entry.last_used;
+                    lru_layer = static_cast<int32_t>(i);
+                }
+            }
+            return free_layer >= 0 ? free_layer : lru_layer;
+        }
+
+        /// @brief 缓存中是否有层完整覆盖可见区域。
+        bool cache_covers(const AppState *state, double x0, double y0, double x1, double y1)
+        {
+            for (const DetailCacheEntry &entry : state->detail_cache)
+            {
+                if (!entry.valid || entry.layer < 0 || entry.frame != state->frame_index)
+                {
+                    continue;
+                }
+                if (entry.rect.x <= x0 + 0.5 && entry.rect.y <= y0 + 0.5 &&
+                    entry.rect.x + entry.rect.width >= x1 - 0.5 &&
+                    entry.rect.y + entry.rect.height >= y1 - 0.5)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    } // namespace
+
     /// @brief 视口停止变化后按需加载 1:1 细节纹理（虚拟切片 Phase 1b）。
     void update_detail(AppState *state)
     {
@@ -589,43 +665,54 @@ namespace voilut::app
         {
             auto result = state->detail_future.get();
             state->detail_inflight = false;
-            const bool current = state->detail_request_generation == state->detail_generation;
-            if (result && current && state->region_source != nullptr)
+            const bool current = state->detail_request_generation == state->detail_generation &&
+                                 state->detail_request_frame == state->frame_index;
+            if (result && current && state->region_source != nullptr &&
+                state->renderer != nullptr)
             {
                 const voilut::PixelRegion &region = *result;
+                const int32_t layer = pick_detail_layer(state);
                 const bool is_float =
                     state->image->pixel_type == voilut::DecodedImage::PixelType::Float32;
                 const auto uploaded =
-                    is_float ? state->renderer->upload_detail_float(
-                                   region.x, region.y, region.width, region.height, region.f32)
-                             : state->renderer->upload_detail(
-                                   region.x, region.y, region.width, region.height, region.u16);
-                if (!uploaded)
-                {
-                    std::println("细节上传失败：{}", uploaded.error());
-                    state->renderer->clear_detail();
-                    state->detail_loaded = {};
-                }
-                else
+                    is_float
+                        ? state->renderer->upload_detail_float(
+                              static_cast<uint32_t>(layer), region.x, region.y, region.width,
+                              region.height, region.f32)
+                        : state->renderer->upload_detail(
+                              static_cast<uint32_t>(layer), region.x, region.y, region.width,
+                              region.height, region.u16);
+                if (uploaded)
                 {
                     if (state->detail_loaded.width == 0.0)
                     {
-                        std::println("细节纹理已启用：{}×{}", region.width, region.height);
+                        std::println("细节纹理已启用：{}×{}（层 {}）", region.width, region.height,
+                                     layer);
                     }
-                    state->detail_loaded = {
+                    DetailCacheEntry &entry =
+                        state->detail_cache[static_cast<size_t>(layer)];
+                    entry.rect = {
                         .x = static_cast<double>(region.x),
                         .y = static_cast<double>(region.y),
                         .width = static_cast<double>(region.width),
                         .height = static_cast<double>(region.height),
                     };
-                    state->detail_loaded_frame = state->frame_index;
+                    entry.layer = layer;
+                    entry.frame = state->frame_index;
+                    entry.last_used = ++state->detail_clock;
+                    entry.valid = true;
+                    state->detail_loaded = entry.rect;
+                    state->detail_loaded_frame = entry.frame;
+                    sync_detail_entries(state);
+                }
+                else
+                {
+                    std::println("细节上传失败：{}", uploaded.error());
                 }
             }
             else if (!result)
             {
                 std::println("细节读取失败：{}", result.error());
-                state->renderer->clear_detail();
-                state->detail_loaded = {};
             }
             glfwPostEmptyEvent();
         }
@@ -633,7 +720,6 @@ namespace voilut::app
         if (state->region_source == nullptr || !state->detail_enabled || state->loading)
         {
             state->renderer->clear_detail();
-            state->detail_loaded = {};
             state->detail_dirty = false;
             return;
         }
@@ -654,9 +740,20 @@ namespace voilut::app
             state->detail_last_viewport = vp;
             state->detail_last_orientation = orientation;
             state->detail_last_frame = state->frame_index;
+            // 让进行中的旧区域结果失效。
+            ++state->detail_generation;
             state->detail_dirty = true;
             state->detail_changed_at = now;
         }
+
+        if (vp.scale < 0.75)
+        {
+            state->renderer->clear_detail();
+            state->detail_dirty = false;
+            return;
+        }
+        sync_detail_entries(state);
+
         if (!state->detail_dirty)
         {
             return;
@@ -667,13 +764,6 @@ namespace voilut::app
         }
         if (state->detail_inflight)
         {
-            return;
-        }
-        if (vp.scale < 0.75)
-        {
-            state->renderer->clear_detail();
-            state->detail_loaded = {};
-            state->detail_dirty = false;
             return;
         }
 
@@ -704,11 +794,27 @@ namespace voilut::app
             return;
         }
 
-        constexpr uint32_t kDetailMax = 4096;
-        const uint32_t max_width = std::min(kDetailMax, meta.width);
-        const uint32_t max_height = std::min(kDetailMax, meta.height);
+        if (cache_covers(state, min_x, min_y, max_x, max_y))
+        {
+            for (DetailCacheEntry &entry : state->detail_cache)
+            {
+                if (entry.valid && entry.frame == state->frame_index && entry.layer >= 0 &&
+                    entry.rect.x <= min_x + 0.5 && entry.rect.y <= min_y + 0.5 &&
+                    entry.rect.x + entry.rect.width >= max_x - 0.5 &&
+                    entry.rect.y + entry.rect.height >= max_y - 0.5)
+                {
+                    entry.last_used = ++state->detail_clock;
+                }
+            }
+            state->detail_dirty = false;
+            sync_detail_entries(state);
+            return;
+        }
+
         // 预取 25% 边距：小幅平移命中同一细节纹理，减少重复区域读取。
         constexpr double kPrefetchMargin = 1.25;
+        const uint32_t max_width = std::min(voilut::ImageRenderer::kDetailLayerSize, meta.width);
+        const uint32_t max_height = std::min(voilut::ImageRenderer::kDetailLayerSize, meta.height);
         const uint32_t min_detail_width = std::min<uint32_t>(256, max_width);
         const uint32_t min_detail_height = std::min<uint32_t>(256, max_height);
         const uint32_t wanted_width = std::clamp<uint32_t>(
@@ -738,19 +844,12 @@ namespace voilut::app
             .width = static_cast<double>(wanted_width),
             .height = static_cast<double>(wanted_height),
         };
-        if (request.x == state->detail_loaded.x && request.y == state->detail_loaded.y &&
-            request.width == state->detail_loaded.width &&
-            request.height == state->detail_loaded.height &&
-            state->detail_loaded_frame == state->frame_index)
-        {
-            state->detail_dirty = false;
-            return;
-        }
 
         state->detail_dirty = false;
         ++state->detail_generation;
         state->detail_request_generation = state->detail_generation;
         state->detail_request = request;
+        state->detail_request_frame = state->frame_index;
         state->detail_inflight = true;
         auto source = state->region_source;
         GLFWwindow *window = state->window;
