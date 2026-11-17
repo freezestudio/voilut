@@ -1,0 +1,31 @@
+# ============================================================
+# CI —— 快速门禁：只构建纯计算库与单元测试（无需 Dawn / GDCM / libtiff）
+# ============================================================
+# 完整应用构建需要 third_party/ 下的 Dawn（约 800 MB，首次编译 5~20 分钟），
+# 不适合每次 PR 都跑；单文件发行构建由 scripts/build_windows.ps1 与本地 Linux
+# 构建负责。这里用 VOILUT_MODEL_ONLY 在秒级内拦住逻辑回归。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  model:
+    name: model (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DVOILUT_MODEL_ONLY=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
