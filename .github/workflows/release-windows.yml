@@ -1,0 +1,46 @@
+# ============================================================
+# Windows 单文件发行（手动触发）
+# ============================================================
+# 需要下载 Dawn / ImGui 并让 vcpkg 构建静态 GDCM，首次运行较慢；
+# 第三方目录与 vcpkg 安装结果都会缓存，后续运行会快很多。
+name: Release Windows (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache third_party
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/install_dawn.ps1', 'scripts/install_imgui.sh') }}
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
+            ${{ env.VCPKG_INSTALLATION_ROOT }}/packages
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('scripts/build_windows.ps1') }}
+
+      - name: Fetch Dawn
+        run: powershell -ExecutionPolicy Bypass -File scripts/install_dawn.ps1
+
+      - name: Fetch ImGui
+        shell: bash
+        run: bash scripts/install_imgui.sh
+
+      - name: Build single-file binary
+        run: powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windower-windows-x64
+          path: dist/windower.exe
+          if-no-files-found: error

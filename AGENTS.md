@@ -159,7 +159,8 @@
 - 版本号在 `CMakeLists.txt` 的 `project(voilut VERSION ...)`，通过
   `VOILUT_VERSION` 宏传给 `windower`；`--version` / `--help` 走这条路径。
 - CI：`.github/workflows/ci.yml` 是秒级的 model-only 门禁（Linux + Windows）；
-  `.github/workflows/release-linux.yml` 是手动触发的完整单文件发行流水线。
+  `.github/workflows/release-linux.yml` / `release-windows.yml` 是手动触发的完整
+  单文件发行流水线（会缓存 third_party 与 vcpkg）。
 
 ## 文档约定
 
