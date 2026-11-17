@@ -148,6 +148,40 @@ int main()
     check(near(display_ratio(100.0, unit_width, false, VoiMode::Dicom), 1.0),
           "DICOM：W=1 阈值以上 → 1");
 
+    // ---------------- 6) 浮点图像（统计 / 窗宽相对下限） ----------------
+    std::printf("6) 浮点图像\n");
+    const std::vector<float> floats = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f};
+    const ImageStats float_stats = compute_stats_float(floats);
+    check(near(float_stats.min_value, 0.0) && near(float_stats.max_value, 2.0),
+          "浮点 min/max 正确");
+    check(float_stats.p1 >= 0.0 && float_stats.p99 <= 2.0, "浮点分位数在值域内");
+    ImageMeta float_meta;
+    float_meta.width = 5;
+    float_meta.height = 1;
+    float_meta.is_float = true;
+    float_meta.min_value = float_stats.min_value;
+    float_meta.max_value = float_stats.max_value;
+    float_meta.p1 = float_stats.p1;
+    float_meta.p99 = float_stats.p99;
+    float_meta.value_range = float_stats.value_range;
+    const WindowSetting float_auto = auto_window(float_meta);
+    check(float_auto.width > 0.0 && float_auto.width <= 2.0, "浮点自动窗不被 100 下限扩大");
+    const WindowSetting float_full = preset_window(float_meta, kWindowPresets[0]);
+    check(near(float_full.width, 2.0), "浮点全范围预设宽度 = 值域");
+    WindowSetting float_drag = float_auto;
+    check(drag_window(float_drag, -1000.0, 0.0, 1e-3, 10.0).width >= 1e-3,
+          "浮点拖动窗宽遵循自定义下限");
+    check(pixel_at_float(floats, 5, 1, 2.2, 0.0).has_value() &&
+              near(*pixel_at_float(floats, 5, 1, 2.2, 0.0), 1.0),
+          "浮点探针取值正确");
+    const Histogram float_hist = compute_histogram_float(floats, 0.0, 2.01);
+    uint32_t float_sum = 0;
+    for (const uint32_t count : float_hist.bins)
+    {
+        float_sum += count;
+    }
+    check(float_sum == floats.size(), "浮点直方图计数完整");
+
     std::printf("\n%s（失败 %d 项）\n", g_failures == 0 ? "全部通过" : "存在失败", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

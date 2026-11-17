@@ -21,6 +21,8 @@ namespace voilut
 
         /// @brief 图像纹理格式：16 位无符号单通道。
         constexpr wgpu::TextureFormat kImageFormat = wgpu::TextureFormat::R16Uint;
+        /// @brief 浮点图像的纹理格式：用 R32Uint 存 float 的位模式，着色器 bitcast。
+        constexpr wgpu::TextureFormat kFloatImageFormat = wgpu::TextureFormat::R32Uint;
 
         /// @brief 顶点步长：pos.xy + uv.xy = 4 个 float。
         constexpr uint64_t kVertexStride = sizeof(float) * 4;
@@ -65,6 +67,32 @@ namespace voilut
                     // +2 实现四舍五入；和最大 4×65535，不会溢出 uint32。
                     dst[static_cast<size_t>(y) * out_width + x] =
                         static_cast<uint16_t>((sum + 2) / 4);
+                }
+            }
+            return dst;
+        }
+
+        /// @brief 浮点版本的 2×2 盒式滤波（在 float 域平均，而不是按位平均）。
+        std::vector<float> downsample_2x2_float(std::span<const float> src, uint32_t src_width,
+                                                uint32_t src_height, uint32_t &out_width,
+                                                uint32_t &out_height)
+        {
+            out_width = std::max(1u, src_width / 2);
+            out_height = std::max(1u, src_height / 2);
+            std::vector<float> dst(static_cast<size_t>(out_width) * out_height);
+            for (uint32_t y = 0; y < out_height; ++y)
+            {
+                const uint32_t y0 = std::min(y * 2, src_height - 1);
+                const uint32_t y1 = std::min(y * 2 + 1, src_height - 1);
+                for (uint32_t x = 0; x < out_width; ++x)
+                {
+                    const uint32_t x0 = std::min(x * 2, src_width - 1);
+                    const uint32_t x1 = std::min(x * 2 + 1, src_width - 1);
+                    const float sum = src[static_cast<size_t>(y0) * src_width + x0] +
+                                      src[static_cast<size_t>(y0) * src_width + x1] +
+                                      src[static_cast<size_t>(y1) * src_width + x0] +
+                                      src[static_cast<size_t>(y1) * src_width + x1];
+                    dst[static_cast<size_t>(y) * out_width + x] = sum / 4.0f;
                 }
             }
             return dst;
@@ -223,6 +251,112 @@ namespace voilut
         };
         image_bind_group_ = context_.device.CreateBindGroup(&bgDesc);
 
+        params_.value_type = 0.0f;
+        update_quad();
+        return {};
+    }
+
+    std::expected<void, std::string> ImageRenderer::upload_float(uint32_t width, uint32_t height,
+                                                                 std::span<const float> pixels)
+    {
+        if (width == 0 || height == 0)
+        {
+            return std::unexpected(std::string("图像尺寸为 0"));
+        }
+        if (pixels.size() < static_cast<size_t>(width) * height)
+        {
+            return std::unexpected(std::string("浮点像素数据长度不足"));
+        }
+        if (width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+        {
+            return std::unexpected(std::format(
+                "浮点图像 {}×{} 超过设备最大纹理边长 {}（需要分块显示）", width, height,
+                context_.max_texture_dimension));
+        }
+
+        image_width_ = width;
+        image_height_ = height;
+        image_bind_group_ = nullptr;
+
+        const uint32_t level_count = mip_level_count(width, height);
+        wgpu::TextureDescriptor texDesc{
+            .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
+            .dimension = wgpu::TextureDimension::e2D,
+            .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
+            .format = kFloatImageFormat,
+            .mipLevelCount = level_count,
+            .sampleCount = 1,
+        };
+
+        try
+        {
+            image_texture_ = context_.device.CreateTexture(&texDesc);
+
+            {
+                const wgpu::TexelCopyTextureInfo destination{.texture = image_texture_};
+                const wgpu::TexelCopyBufferLayout layout{
+                    .offset = 0,
+                    .bytesPerRow = width * static_cast<uint32_t>(sizeof(float)),
+                    .rowsPerImage = height,
+                };
+                const wgpu::Extent3D write_size{
+                    .width = width, .height = height, .depthOrArrayLayers = 1};
+                context_.device.GetQueue().WriteTexture(
+                    &destination, pixels.data(), pixels.size() * sizeof(float), &layout,
+                    &write_size);
+            }
+
+            std::span<const float> source = pixels;
+            uint32_t source_width = width;
+            uint32_t source_height = height;
+            std::vector<float> level_pixels;
+            for (uint32_t level = 1; level < level_count; ++level)
+            {
+                uint32_t level_width = 1;
+                uint32_t level_height = 1;
+                std::vector<float> next = downsample_2x2_float(source, source_width,
+                                                               source_height, level_width,
+                                                               level_height);
+
+                const wgpu::TexelCopyTextureInfo destination{
+                    .texture = image_texture_,
+                    .mipLevel = level,
+                };
+                const wgpu::TexelCopyBufferLayout layout{
+                    .offset = 0,
+                    .bytesPerRow = level_width * static_cast<uint32_t>(sizeof(float)),
+                    .rowsPerImage = level_height,
+                };
+                const wgpu::Extent3D write_size{
+                    .width = level_width, .height = level_height, .depthOrArrayLayers = 1};
+                context_.device.GetQueue().WriteTexture(&destination, next.data(),
+                                                        next.size() * sizeof(float), &layout,
+                                                        &write_size);
+
+                level_pixels = std::move(next);
+                source = level_pixels;
+                source_width = level_width;
+                source_height = level_height;
+            }
+        }
+        catch (const std::bad_alloc &)
+        {
+            image_texture_ = nullptr;
+            return std::unexpected(std::string("内存不足：生成浮点 mipmap 时分配失败"));
+        }
+
+        const wgpu::BindGroupEntry entry{
+            .binding = 0,
+            .textureView = image_texture_.CreateView(),
+        };
+        const wgpu::BindGroupDescriptor bgDesc{
+            .layout = image_pipeline_.GetBindGroupLayout(1),
+            .entryCount = 1,
+            .entries = &entry,
+        };
+        image_bind_group_ = context_.device.CreateBindGroup(&bgDesc);
+
+        params_.value_type = 1.0f;
         update_quad();
         return {};
     }

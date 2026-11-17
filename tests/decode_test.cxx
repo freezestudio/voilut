@@ -1,11 +1,12 @@
 /// @file decode_test.cxx
 /// @brief TIFF 解码回归测试（fixtures 由 libtiff 在临时目录现场生成，不入库）。
 /// @details 覆盖：stripped / tiled、小端 / 大端、8 位 / 16 位、MINISWHITE、多页计数、
-///          浮点 TIFF 拒绝；多页文件逐帧校验（受 kMaxDecodeBytes 限制）。
+///          浮点 TIFF、多页逐帧校验（受 kMaxDecodeBytes 限制）。
 
 #include "decode/tiff_decode.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -284,28 +285,39 @@ int main()
         }
     }
 
-    // ---------------- 6) 浮点 TIFF 明确拒绝 ----------------
+    // ---------------- 6) 浮点 TIFF（32 位 float） ----------------
     {
-        std::printf("6) 浮点 TIFF 拒绝\n");
+        std::printf("6) 浮点 TIFF\n");
         const uint32_t w = 4;
         const uint32_t h = 2;
+        std::vector<float> values(static_cast<size_t>(w) * h);
+        for (size_t i = 0; i < values.size(); ++i)
+        {
+            values[i] = 0.5f + static_cast<float>(i) * 0.25f;
+        }
         const auto path = g_dir / "float32.tif";
         TIFF *tif = open_writer(path, true);
         check(tif != nullptr, "创建 fixture");
         if (tif)
         {
             set_common_fields(tif, w, h, 32, PHOTOMETRIC_MINISBLACK, SAMPLEFORMAT_IEEEFP);
-            std::vector<float> row(w, 1.5f);
             for (uint32_t y = 0; y < h; ++y)
             {
-                TIFFWriteScanline(tif, row.data(), y, 0);
+                TIFFWriteScanline(tif, values.data() + static_cast<size_t>(y) * w, y, 0);
             }
             TIFFClose(tif);
         }
-        auto image = voilut::decode_tiff(to_utf8(path));
-        check(!image.has_value(), "浮点 TIFF 返回错误");
-        check(image.has_value() || image.error().find("浮点") != std::string::npos,
-              "错误信息说明不支持浮点");
+        if (auto image = decode(path))
+        {
+            check(image->pixel_type == voilut::DecodedImage::PixelType::Float32,
+                  "pixel_type = Float32");
+            check(image->meta.is_float, "meta.is_float");
+            check(std::abs(image->meta.min_value - 0.5) < 1e-6, "min = 0.5");
+            check(std::abs(image->meta.max_value - 2.25) < 1e-6, "max = 2.25");
+            const auto floats = image->frame_floats(0);
+            check(floats.size() == values.size(), "float 帧长度正确");
+            check(std::equal(floats.begin(), floats.end(), values.begin()), "浮点像素值一致");
+        }
     }
 
     std::filesystem::remove_all(g_dir, ec);

@@ -32,7 +32,7 @@ namespace voilut
         float linear = 0.0f;     ///< 插值开关（>0.5 双线性）。
         float transform = 0.0f;  ///< 显示方向编码（见 `encode_orientation`）。
         float mode = 0.0f;       ///< 映射公式：0 = 简化，1 = DICOM 精确（见 `VoiMode`）。
-        float pad1 = 0.0f;       ///< 对齐填充。
+        float value_type = 0.0f; ///< 像素类型：0 = uint16，1 = float32（纹理存位模式）。
         float pad2 = 0.0f;       ///< 对齐填充。
     };
 
@@ -67,6 +67,15 @@ namespace voilut
         [[nodiscard("upload 必须检查返回值")]]
         std::expected<void, std::string> upload(uint32_t width, uint32_t height,
                                                  std::span<const uint16_t> pixels);
+
+        /// @brief 上传 32 位浮点像素（内部用 R32Uint 纹理存位模式，着色器 bitcast）。
+        /// @param width 图像宽。
+        /// @param height 图像高。
+        /// @param pixels 行优先的 32 位浮点像素（NaN / Inf 也按位存储）。
+        /// @return 成功为空；超限或内存不足时返回错误说明。
+        [[nodiscard("upload_float 必须检查返回值")]]
+        std::expected<void, std::string> upload_float(uint32_t width, uint32_t height,
+                                                      std::span<const float> pixels);
 
         /// @brief 设置窗宽窗位。
         void set_window(double level, double width);

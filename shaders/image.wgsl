@@ -23,7 +23,7 @@ struct WindowParams {
   linear: f32,    // 是否线性插值：>0.5 为双线性
   transform: f32, // 显示方向编码：bit0-1 旋转，bit2 水平翻转，bit3 垂直翻转
   mode: f32,      // 映射公式：0 = 简化，1 = DICOM 精确（C.11.2.1.2.1）
-  _pad1: f32,
+  value_type: f32, // 像素类型：0 = uint16，1 = float32（R32Uint 存位模式）
   _pad2: f32,
 }
 
@@ -75,16 +75,25 @@ fn select_lod(image_uv: vec2<f32>) -> i32 {
   return i32(clamp(floor(lod + 0.5), 0.0, max(0.0, max_level)));
 }
 
+// 读取纹理值并转成 f32：uint16 直接转换，float32 用 bitcast（纹理为 R32Uint）。
+fn load_value(coord: vec2<i32>, level: i32) -> f32 {
+  let raw = textureLoad(image, coord, level).r;
+  if (params.value_type > 0.5) {
+    return bitcast<f32>(raw);
+  }
+  return f32(raw);
+}
+
 // 最近邻采样：按 UV 取最近像素，放大时保留锐利边缘。
 fn sampleNearest(uv: vec2<f32>) -> f32 {
   let lod = select_lod(uv);
   let size = vec2<i32>(textureDimensions(image, lod));
   let coord = clamp(vec2<i32>(vec2<f32>(size) * uv), vec2<i32>(0), size - vec2<i32>(1));
-  return f32(textureLoad(image, coord, lod).r);
+  return load_value(coord, lod);
 }
 
 // 双线性采样：手动对 4 个邻居按小数权重混合。
-// （r16uint 纹理不能直接用采样器做插值，因此手动实现。）
+// （整数纹理不能直接用采样器做插值，因此手动实现；浮点也走同一路径。）
 fn sampleBilinear(uv: vec2<f32>) -> f32 {
   let lod = select_lod(uv);
   let size = vec2<i32>(textureDimensions(image, lod));
@@ -93,10 +102,10 @@ fn sampleBilinear(uv: vec2<f32>) -> f32 {
   let frac = p - floor(p);
   let lo = clamp(base, vec2<i32>(0), size - vec2<i32>(1));
   let hi = clamp(base + vec2<i32>(1), vec2<i32>(0), size - vec2<i32>(1));
-  let v00 = f32(textureLoad(image, vec2<i32>(lo.x, lo.y), lod).r);
-  let v10 = f32(textureLoad(image, vec2<i32>(hi.x, lo.y), lod).r);
-  let v01 = f32(textureLoad(image, vec2<i32>(lo.x, hi.y), lod).r);
-  let v11 = f32(textureLoad(image, vec2<i32>(hi.x, hi.y), lod).r);
+  let v00 = load_value(vec2<i32>(lo.x, lo.y), lod);
+  let v10 = load_value(vec2<i32>(hi.x, lo.y), lod);
+  let v01 = load_value(vec2<i32>(lo.x, hi.y), lod);
+  let v11 = load_value(vec2<i32>(hi.x, hi.y), lod);
   return mix(mix(v00, v10, frac.x), mix(v01, v11, frac.x), frac.y);
 }
 

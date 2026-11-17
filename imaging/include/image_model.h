@@ -22,7 +22,8 @@ namespace voilut
         uint32_t height = 0;
         uint32_t bits_per_sample = 0;
         uint32_t samples_per_pixel = 1;
-        uint32_t frame_count = 1;   ///< 帧数（多页 TIFF / 多帧 DICOM；目前只显示首帧）。
+        uint32_t frame_count = 1;   ///< 帧数（多页 TIFF / 多帧 DICOM）。
+        bool is_float = false;      ///< 像素是否为 32 位浮点（影响窗宽下限与显示格式）。
         double min_value = 0.0;
         double max_value = 0.0;
         double p1 = 0.0;
@@ -49,24 +50,48 @@ namespace voilut
     /// @brief 解码完成的图像。
     struct DecodedImage
     {
+        /// @brief 像素数据类型。
+        enum class PixelType
+        {
+            UInt16,  ///< 16 位无符号整数（常见医学影像）。
+            Float32, ///< 32 位浮点（显微 / 科学相机）。
+        };
+
         std::string name;                              ///< 文件名 / 数据源名。
         ImageMeta meta;                                ///< 元数据与统计（首帧）。
+        PixelType pixel_type = PixelType::UInt16;      ///< 像素类型。
         /// 16 位像素（行优先，连续存所有帧）：第 f 帧从 `f * width * height` 开始。
         /// 单帧图像长度 = width * height。
         std::vector<uint16_t> pixels;
+        /// 32 位浮点像素（`pixel_type == Float32` 时使用，同样连续存所有帧）。
+        std::vector<float> float_pixels;
         std::optional<WindowSetting> default_window;   ///< 文件自带的默认窗（DICOM）。
         bool initial_invert = false;                   ///< 初始是否反色（MONOCHROME1）。
 
-        /// @brief 取指定帧的像素视图（越界返回空 span）。
+        /// @brief 取指定帧的 16 位像素视图（越界返回空 span）。
         /// @param index 帧序号（0-based）。
         [[nodiscard]] std::span<const uint16_t> frame_pixels(uint32_t index) const noexcept
         {
-            if (index >= meta.frame_count || meta.width == 0 || meta.height == 0)
+            if (pixel_type != PixelType::UInt16 || index >= meta.frame_count ||
+                meta.width == 0 || meta.height == 0)
             {
                 return {};
             }
             const size_t count = static_cast<size_t>(meta.width) * meta.height;
             return {pixels.data() + count * index, count};
+        }
+
+        /// @brief 取指定帧的浮点像素视图（越界返回空 span）。
+        /// @param index 帧序号（0-based）。
+        [[nodiscard]] std::span<const float> frame_floats(uint32_t index) const noexcept
+        {
+            if (pixel_type != PixelType::Float32 || index >= meta.frame_count ||
+                meta.width == 0 || meta.height == 0)
+            {
+                return {};
+            }
+            const size_t count = static_cast<size_t>(meta.width) * meta.height;
+            return {float_pixels.data() + count * index, count};
         }
     };
 
@@ -85,6 +110,11 @@ namespace voilut
     /// @return 统计结果；空输入返回全 0。
     [[nodiscard]] ImageStats compute_stats(std::span<const uint16_t> pixels);
 
+    /// @brief 统计浮点像素的 min/max 与 p1/p99（量化为 65536 桶后取分位数）。
+    /// @param pixels 浮点像素。
+    /// @return 统计结果；空输入返回全 0。
+    [[nodiscard]] ImageStats compute_stats_float(std::span<const float> pixels);
+
     /// @brief 依据 p1/p99 计算默认窗（窄窗拉伸对比度）。
     /// @param meta 含 p1/p99 的元数据。
     /// @return 默认窗设置。
@@ -100,6 +130,15 @@ namespace voilut
                                                               uint32_t width, uint32_t height,
                                                               const Rect &roi);
 
+    /// @brief 计算 ROI 内的 p1/p99 自动窗（浮点像素）。
+    /// @param pixels 浮点像素。
+    /// @param width 图像宽。
+    /// @param height 图像高。
+    /// @param roi ROI（图像坐标，越界部分裁剪）。
+    /// @return ROI 无效（宽或高 < 4）时返回 `std::nullopt`。
+    [[nodiscard]] std::optional<WindowSetting> window_for_roi_float(
+        std::span<const float> pixels, uint32_t width, uint32_t height, const Rect &roi);
+
     /// @brief 读取指定图像坐标的像素值。
     /// @param pixels 16 位像素。
     /// @param width 图像宽。
@@ -109,6 +148,17 @@ namespace voilut
     /// @return 越界时返回 `std::nullopt`。
     [[nodiscard]] std::optional<uint16_t> pixel_at(std::span<const uint16_t> pixels, uint32_t width,
                                                    uint32_t height, double x, double y) noexcept;
+
+    /// @brief 读取浮点图像在指定坐标的像素值。
+    /// @param pixels 浮点像素。
+    /// @param width 图像宽。
+    /// @param height 图像高。
+    /// @param x 图像坐标 x（可为小数，向下取整）。
+    /// @param y 图像坐标 y（可为小数，向下取整）。
+    /// @return 越界时返回 `std::nullopt`。
+    [[nodiscard]] std::optional<float> pixel_at_float(std::span<const float> pixels, uint32_t width,
+                                                      uint32_t height, double x,
+                                                      double y) noexcept;
 
     // ========================================================
     // 调窗核心 API：直方图（可视化）、预设窗（相对值域）、
@@ -135,6 +185,14 @@ namespace voilut
     /// @return 直方图；区间非法或输入为空时返回全零。
     [[nodiscard]] Histogram compute_histogram(std::span<const uint16_t> pixels, double low,
                                               double high);
+
+    /// @brief 在 `[low, high]` 区间上统计浮点图像的 256 桶直方图。
+    /// @param pixels 浮点像素。
+    /// @param low 区间下界。
+    /// @param high 区间上界。
+    /// @return 直方图；区间非法或输入为空时返回全零。
+    [[nodiscard]] Histogram compute_histogram_float(std::span<const float> pixels, double low,
+                                                    double high);
 
     /// @brief 预设窗：以图像值域的比例描述，跨设备 / 跨模态通用。
     struct WindowPreset
@@ -165,10 +223,14 @@ namespace voilut
     /// @param window 当前窗（原地更新，并为返回值）。
     /// @param dx 屏幕水平位移（像素，右为正）。
     /// @param dy 屏幕垂直位移（像素，下为正）。
-    /// @return 更新后的窗；`width` 限制在 [1, 65535]。
+    /// @param min_width 窗宽下限（整数图像为 1，浮点图像按值域比例）。
+    /// @param max_width 窗宽上限。
+    /// @return 更新后的窗。
     /// @note 窗宽按指数缩放（不同窗宽下的操作灵敏度一致）；窗位按当前窗宽的比例平移
     ///       （窄窗时步进更小，宽窗时步进更大）。
-    [[nodiscard]] WindowSetting drag_window(WindowSetting &window, double dx, double dy) noexcept;
+    [[nodiscard]] WindowSetting drag_window(WindowSetting &window, double dx, double dy,
+                                            double min_width = 1.0,
+                                            double max_width = 65535.0) noexcept;
 
     /// @brief 像素值 → 显示灰度系数的映射公式。
     /// @details 两种模式只影响「窗 → 灰度」的线性区间与边界，不影响自动窗 / ROI 窗的计算。

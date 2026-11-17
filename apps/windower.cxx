@@ -43,6 +43,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <expected>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -133,7 +134,7 @@ namespace
         bool hover_valid = false;
         int hover_x = 0;
         int hover_y = 0;
-        uint16_t hover_value = 0;
+        double hover_value = 0.0; ///< 当前像素值（整数图像也为 double，便于统一格式化）。
 
         // 图像列表（同目录图像）。
         std::vector<std::string> playlist;
@@ -227,12 +228,15 @@ namespace
         {
             return;
         }
-        // 窗位限制在「数据范围 + 5% 余量」内，窗宽限制在 16 位合法区间。
-        // 注意窗宽上界不限制到滑块范围：DICOM 自带的窗宽可能比实际值域宽，
-        // 限制得过窄会把窗设成完全不同的对比度。
+        const bool is_float = state->image != nullptr && state->image->meta.is_float;
+        const double min_width = is_float ? state->width_min : 1.0;
+        const double max_width = is_float ? std::max(state->width_max, min_width * 10.0) : 65535.0;
+        // 窗位限制在「数据范围 + 5% 余量」内；整数窗宽允许 1..65535，
+        // 浮点窗宽按值域比例（否则 0..1 的数据会被扩成几千）。
         state->window_setting.level =
             std::clamp(state->window_setting.level, state->level_min, state->level_max);
-        state->window_setting.width = std::clamp(state->window_setting.width, 1.0, 65535.0);
+        state->window_setting.width =
+            std::clamp(state->window_setting.width, min_width, max_width);
         state->renderer->set_window(state->window_setting.level, state->window_setting.width);
     }
 
@@ -250,6 +254,51 @@ namespace
 
     /// @brief 切换多页 / 多帧文件的当前帧（定义在 apply_image 之后）。
     void set_frame(AppState *state, uint32_t frame);
+
+    /// @brief 按像素类型上传指定帧。
+    std::expected<void, std::string> upload_frame(voilut::ImageRenderer &renderer,
+                                                  const voilut::DecodedImage &image,
+                                                  uint32_t frame)
+    {
+        if (image.pixel_type == voilut::DecodedImage::PixelType::Float32)
+        {
+            return renderer.upload_float(image.meta.width, image.meta.height,
+                                         image.frame_floats(frame));
+        }
+        return renderer.upload(image.meta.width, image.meta.height, image.frame_pixels(frame));
+    }
+
+    /// @brief 统计指定帧（整数 / 浮点分派）。
+    voilut::ImageStats frame_stats(const voilut::DecodedImage &image, uint32_t frame)
+    {
+        return image.pixel_type == voilut::DecodedImage::PixelType::Float32
+                   ? voilut::compute_stats_float(image.frame_floats(frame))
+                   : voilut::compute_stats(image.frame_pixels(frame));
+    }
+
+    /// @brief 指定帧的 256 桶直方图（整数 / 浮点分派）。
+    voilut::Histogram frame_histogram(const voilut::DecodedImage &image, uint32_t frame, double low,
+                                      double high)
+    {
+        return image.pixel_type == voilut::DecodedImage::PixelType::Float32
+                   ? voilut::compute_histogram_float(image.frame_floats(frame), low, high)
+                   : voilut::compute_histogram(image.frame_pixels(frame), low, high);
+    }
+
+    /// @brief 设置窗宽滑块范围与拖拽盘限（浮点按值域比例）。
+    void set_width_limits(AppState *state, const voilut::ImageMeta &meta)
+    {
+        if (meta.is_float)
+        {
+            state->width_min = std::max(meta.value_range * 1e-4, 1e-12);
+            state->width_max = std::max(meta.value_range * 1.2, state->width_min * 10.0);
+        }
+        else
+        {
+            state->width_min = 1.0;
+            state->width_max = std::max(meta.value_range, 2.0);
+        }
+    }
 
     /// @brief 适应视口（等比缩放并居中）。
     void fit_to_window(AppState *state)
@@ -424,9 +473,15 @@ namespace
         {
             return false;
         }
-        const auto setting = voilut::window_for_roi(
-            state->image->frame_pixels(state->frame_index), state->image->meta.width,
-            state->image->meta.height, state->roi_image);
+        const auto setting = state->image->pixel_type == voilut::DecodedImage::PixelType::Float32
+                                 ? voilut::window_for_roi_float(
+                                       state->image->frame_floats(state->frame_index),
+                                       state->image->meta.width, state->image->meta.height,
+                                       state->roi_image)
+                                 : voilut::window_for_roi(
+                                       state->image->frame_pixels(state->frame_index),
+                                       state->image->meta.width, state->image->meta.height,
+                                       state->roi_image);
         if (!setting)
         {
             return false; // 选区太小，保持当前窗
@@ -482,9 +537,7 @@ namespace
         // 先上传纹理：失败时保留当前图像，并向用户报告原因（例如超过纹理上限）。
         if (state->renderer != nullptr)
         {
-            if (auto uploaded = state->renderer->upload(image.meta.width, image.meta.height,
-                                                        image.frame_pixels(0));
-                !uploaded)
+            if (auto uploaded = upload_frame(*state->renderer, image, 0); !uploaded)
             {
                 report_error(state, uploaded.error());
                 return;
@@ -496,9 +549,15 @@ namespace
         state->frame_index = 0;
 
         const voilut::ImageMeta &meta = state->image->meta;
+        // DICOM 精确 VOI 只对整数像素有意义（W-1 分母/阈值）；浮点图像回到简化公式。
+        if (meta.is_float && state->voi_mode == voilut::VoiMode::Dicom)
+        {
+            state->voi_mode = voilut::VoiMode::Simplified;
+            state->renderer->set_voi_mode(state->voi_mode);
+        }
         state->level_min = meta.min_value - meta.value_range * 0.05;
         state->level_max = meta.max_value + meta.value_range * 0.05;
-        state->width_max = std::max(meta.value_range, 2.0);
+        set_width_limits(state, meta);
         state->invert = state->image->initial_invert;
         state->roi_active = false;
         state->roi_done = false;
@@ -512,9 +571,8 @@ namespace
         state->renderer->set_orientation(state->orientation);
 
         // 直方图：只在新图加载时计算一次（首帧，[min, max] 上的 256 桶）。
-        state->histogram = voilut::compute_histogram(
-            state->image->frame_pixels(0), meta.min_value,
-            std::max(meta.max_value, meta.min_value + 1.0));
+        state->histogram = frame_histogram(*state->image, 0, meta.min_value,
+                                           std::max(meta.max_value, meta.min_value + 1.0));
 
         // 窗值：优先恢复该图的上次窗值，否则 DICOM 默认窗 → p1/p99 自动窗。
         const auto it = state->remembered.find(path);
@@ -533,9 +591,19 @@ namespace
         {
             update_window_title(state);
         }
-        std::println("已加载 {}（{}x{}，{} bit，值域 {} ~ {}）", state->image->name, meta.width,
-                     meta.height, meta.bits_per_sample, static_cast<long long>(meta.min_value),
-                     static_cast<long long>(meta.max_value));
+        if (meta.is_float)
+        {
+            std::println("已加载 {}（{}x{}，32 位浮点，值域 {:.6g} ~ {:.6g}）",
+                         state->image->name, meta.width, meta.height, meta.min_value,
+                         meta.max_value);
+        }
+        else
+        {
+            std::println("已加载 {}（{}x{}，{} bit，值域 {} ~ {}）", state->image->name,
+                         meta.width, meta.height, meta.bits_per_sample,
+                         static_cast<long long>(meta.min_value),
+                         static_cast<long long>(meta.max_value));
+        }
         if (meta.frame_count > 1)
         {
             std::println("多帧/多页文件：共 {} 帧，可用 , / . 或面板滑块切换", meta.frame_count);
@@ -560,10 +628,7 @@ namespace
             return;
         }
 
-        const uint32_t width = state->image->meta.width;
-        const uint32_t height = state->image->meta.height;
-        const auto pixels = state->image->frame_pixels(frame);
-        if (auto uploaded = state->renderer->upload(width, height, pixels); !uploaded)
+        if (auto uploaded = upload_frame(*state->renderer, *state->image, frame); !uploaded)
         {
             report_error(state, uploaded.error());
             return;
@@ -571,7 +636,7 @@ namespace
         state->frame_index = frame;
 
         // 帧统计用于直方图与滑块范围；窗值保持不变（z-stack / 时间序列对比时需要一致）。
-        const voilut::ImageStats stats = voilut::compute_stats(pixels);
+        const voilut::ImageStats stats = frame_stats(*state->image, frame);
         voilut::ImageMeta &meta = state->image->meta;
         meta.min_value = stats.min_value;
         meta.max_value = stats.max_value;
@@ -580,15 +645,23 @@ namespace
         meta.value_range = stats.value_range;
         state->level_min = stats.min_value - stats.value_range * 0.05;
         state->level_max = stats.max_value + stats.value_range * 0.05;
-        state->width_max = std::max(stats.value_range, 2.0);
-        state->histogram = voilut::compute_histogram(
-            pixels, stats.min_value, std::max(stats.max_value, stats.min_value + 1.0));
+        set_width_limits(state, meta);
+        state->histogram = frame_histogram(*state->image, frame, stats.min_value,
+                                           std::max(stats.max_value, stats.min_value + 1.0));
 
         apply_window(state);
         update_window_title(state);
-        std::println("当前帧 {}/{}（值域 {} ~ {}）", frame + 1, count,
-                     static_cast<long long>(stats.min_value),
-                     static_cast<long long>(stats.max_value));
+        if (meta.is_float)
+        {
+            std::println("当前帧 {}/{}（值域 {:.6g} ~ {:.6g}）", frame + 1, count,
+                         stats.min_value, stats.max_value);
+        }
+        else
+        {
+            std::println("当前帧 {}/{}（值域 {} ~ {}）", frame + 1, count,
+                         static_cast<long long>(stats.min_value),
+                         static_cast<long long>(stats.max_value));
+        }
     }
 
     /// @brief 解码并显示图像列表中的第 `index` 项。
@@ -900,6 +973,7 @@ namespace
             }
             item_tooltip("放大时使用双线性插值");
 
+            ImGui::BeginDisabled(state->image != nullptr && state->image->meta.is_float);
             if (menu_item("DICOM 精确 VOI", nullptr, state->voi_mode == voilut::VoiMode::Dicom))
             {
                 state->voi_mode = state->voi_mode == voilut::VoiMode::Dicom
@@ -908,6 +982,7 @@ namespace
                 state->renderer->set_voi_mode(state->voi_mode);
             }
             item_tooltip("切换窗值→灰度公式：简化（W 分母）/ DICOM 精确（W-1 分母，C.11.2.1.2.1）");
+            ImGui::EndDisabled();
 
             if (menu_item("记住窗值", nullptr, state->remember_window))
             {
@@ -1007,8 +1082,11 @@ namespace
         {
             // 从拖动起点的窗按总位移换算：不会累积，松开后再次拖动不会跳变。
             voilut::WindowSetting dragged = state->wl_base;
-            state->window_setting =
-                voilut::drag_window(dragged, x - state->wl_start_x, y - state->wl_start_y);
+            const bool is_float = state->image->meta.is_float;
+            state->window_setting = voilut::drag_window(
+                dragged, x - state->wl_start_x, y - state->wl_start_y,
+                is_float ? state->width_min : 1.0,
+                is_float ? state->width_max : 65535.0);
             state->roi_windowed = false;
             apply_window(state);
         }
@@ -1131,7 +1209,11 @@ namespace
         }
         // Ctrl 按下时步长更小，便于在窄窗下微调。
         const double fine = (mods & GLFW_MOD_CONTROL) != 0 ? 0.2 : 1.0;
-        const double level_step = std::max(state->window_setting.width * 0.02 * fine, 1.0);
+        // 整数图像的窗位步进下限为 1；浮点图像按窗宽比例，否则 1.0 会把窗位
+        // 直接跳到值域之外（浮点值域可能只有 0..1）。
+        const bool is_float = state->image != nullptr && state->image->meta.is_float;
+        const double level_step = std::max(state->window_setting.width * 0.02 * fine,
+                                           is_float ? 0.0 : 1.0);
 
         switch (key)
         {
@@ -1239,15 +1321,36 @@ namespace
         double mouse_y = 0.0;
         glfwGetCursorPos(state->window, &mouse_x, &mouse_y);
         const auto [image_x, image_y] = screen_to_original(state, mouse_x, mouse_y);
-        const auto value = voilut::pixel_at(
-            state->image->frame_pixels(state->frame_index), state->image->meta.width,
-            state->image->meta.height, image_x, image_y);
-        if (value)
+        const uint32_t frame = state->frame_index;
+        bool valid = false;
+        if (state->image->pixel_type == voilut::DecodedImage::PixelType::Float32)
+        {
+            const auto value = voilut::pixel_at_float(state->image->frame_floats(frame),
+                                                      state->image->meta.width,
+                                                      state->image->meta.height, image_x,
+                                                      image_y);
+            if (value)
+            {
+                state->hover_value = static_cast<double>(*value);
+                valid = true;
+            }
+        }
+        else
+        {
+            const auto value = voilut::pixel_at(state->image->frame_pixels(frame),
+                                                state->image->meta.width,
+                                                state->image->meta.height, image_x, image_y);
+            if (value)
+            {
+                state->hover_value = static_cast<double>(*value);
+                valid = true;
+            }
+        }
+        if (valid)
         {
             state->hover_valid = true;
             state->hover_x = static_cast<int>(std::floor(image_x));
             state->hover_y = static_cast<int>(std::floor(image_y));
-            state->hover_value = *value;
         }
         else
         {
@@ -1438,8 +1541,19 @@ namespace
         const voilut::ImageMeta &meta = state->image->meta;
         ImGui::Separator();
         ImGui::Text("%s", state->image->name.c_str());
-        ImGui::TextDisabled("%u x %u  ·  %u bit  ·  值域 %.0f ~ %.0f", meta.width, meta.height,
-                            meta.bits_per_sample, meta.min_value, meta.max_value);
+        if (meta.is_float)
+        {
+            ImGui::TextDisabled("%u x %u  ·  %u bit float  ·  值域 %.6g ~ %.6g", meta.width,
+                                meta.height, meta.bits_per_sample, meta.min_value,
+                                meta.max_value);
+        }
+        else
+        {
+            ImGui::TextDisabled("%u x %u  ·  %u bit  ·  值域 %.0f ~ %.0f", meta.width,
+                                meta.height, meta.bits_per_sample, meta.min_value,
+                                meta.max_value);
+        }
+        const char *value_format = meta.is_float ? "%.4g" : "%.0f";
 
         if (meta.frame_count > 1)
         {
@@ -1473,7 +1587,7 @@ namespace
             double level = state->window_setting.level;
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::SliderScalar("##level", ImGuiDataType_Double, &level, &state->level_min,
-                                    &state->level_max, "%.0f"))
+                                    &state->level_max, value_format))
             {
                 state->window_setting.level = level;
                 state->roi_windowed = false;
@@ -1485,7 +1599,8 @@ namespace
             ImGui::SetNextItemWidth(-1.0f);
             // InputDouble 不支持 EnterReturnsTrue（ImGui 会断言），改用
             // 「编辑结束」判定：回车或失焦均视为提交。
-            ImGui::InputDouble("##level_input", &level_input, 0.0, 0.0, "%.1f");
+            ImGui::InputDouble("##level_input", &level_input, 0.0, 0.0,
+                               meta.is_float ? "%.6g" : "%.1f");
             item_tooltip("输入窗位，回车或失焦后生效");
             if (ImGui::IsItemDeactivatedAfterEdit())
             {
@@ -1502,7 +1617,7 @@ namespace
             double window_width = state->window_setting.width;
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::SliderScalar("##width", ImGuiDataType_Double, &window_width,
-                                    &state->width_min, &state->width_max, "%.0f"))
+                                    &state->width_min, &state->width_max, value_format))
             {
                 state->window_setting.width = window_width;
                 state->roi_windowed = false;
@@ -1512,11 +1627,13 @@ namespace
             ImGui::TableSetColumnIndex(2);
             double width_input = state->window_setting.width;
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::InputDouble("##width_input", &width_input, 0.0, 0.0, "%.1f");
+            ImGui::InputDouble("##width_input", &width_input, 0.0, 0.0,
+                               meta.is_float ? "%.6g" : "%.1f");
             item_tooltip("输入窗宽，回车或失焦后生效；最小为 1");
             if (ImGui::IsItemDeactivatedAfterEdit())
             {
-                state->window_setting.width = std::max(width_input, 1.0);
+                state->window_setting.width =
+                    std::max(width_input, meta.is_float ? state->width_min : 1.0);
                 state->roi_windowed = false;
                 apply_window(state);
             }
@@ -1630,9 +1747,8 @@ namespace
         {
             const double ratio = voilut::display_ratio(state->hover_value, state->window_setting,
                                                        state->invert, state->voi_mode);
-            ImGui::Text("像素 (%d, %d) = %u → 显示 %d", state->hover_x, state->hover_y,
-                        static_cast<unsigned>(state->hover_value),
-                        static_cast<int>(std::lround(ratio * 255.0)));
+            ImGui::Text("像素 (%d, %d) = %.6g → 显示 %d", state->hover_x, state->hover_y,
+                        state->hover_value, static_cast<int>(std::lround(ratio * 255.0)));
         }
         else
         {
@@ -1711,7 +1827,7 @@ namespace
             }
             ImGui::TextDisabled("原图 ROI (%.0f, %.0f)  %.0f × %.0f", record.rect.x,
                                 record.rect.y, record.rect.width, record.rect.height);
-            ImGui::TextDisabled("窗位 %.0f  窗宽 %.0f", record.window.level, record.window.width);
+            ImGui::TextDisabled("窗位 %.6g  窗宽 %.6g", record.window.level, record.window.width);
             ImGui::PopID();
             ImGui::Separator();
         }
@@ -1730,8 +1846,11 @@ namespace
 
         // 左上角窗值（跟随窗口而非面板，全屏查看时也能看到）。
         const std::string text =
-            std::format("L {:.0f}   W {:.0f}", state->window_setting.level,
-                        state->window_setting.width);
+            state->image->meta.is_float
+                ? std::format("L {:.6g}   W {:.6g}", state->window_setting.level,
+                              state->window_setting.width)
+                : std::format("L {:.0f}   W {:.0f}", state->window_setting.level,
+                              state->window_setting.width);
         const ImVec2 pos(ui_px(state, kPanelMargin + kPanelWidth + 16.0f),
                          ImGui::GetFrameHeight() + ui_px(state, 8.0f));
         for (int dx = -1; dx <= 1; ++dx)
