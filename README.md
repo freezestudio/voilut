@@ -247,6 +247,7 @@ tests/     window_model_test.cxx —— 调窗与 VOI 公式单测（CTest）
            decode_test.cxx       —— TIFF 解码回归（fixtures 由测试现场生成）
            region_source_test.cxx —— TIFF 区域读取回归（虚拟切片）
            detail_cache_test.cxx  —— 细节 LRU 缓存策略
+           detail_integration_test.cxx —— 缓存命中不重复读取的集成测试
 ```
 
 数据流：

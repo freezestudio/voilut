@@ -43,12 +43,13 @@ cmake --build build-release
 ctest --test-dir build-release --output-on-failure
 ```
 
-CTest 必须 **4/4** 通过：
+CTest 必须 **5/5** 通过：
 
 - `window_model_test`
 - `decode_test`
 - `region_source_test`
 - `detail_cache_test`
+- `detail_integration_test`（缓存命中不重复读取）
 
 ### 1.3 单文件检查
 

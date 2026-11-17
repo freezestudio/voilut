@@ -133,7 +133,8 @@
   按需渲染下 detail_dirty 时主循环必须用 `glfwWaitEventsTimeout`（否则阻塞在
   WaitEvents，防抖到期后不再触发）。
   缓存策略在 `apps/detail_cache.h`（不依赖 GPU），由 `detail_cache_test` 覆盖
-  选层/覆盖判断/按帧收集/LRU；改策略时先补测试再接 `update_detail`。
+  选层/覆盖判断/按帧收集/LRU；`detail_integration_test` 用计数版 `RegionSource`
+  验证缓存命中时不再调用 `read_region`。改策略时先补测试再接 `update_detail`。
 - 大图预览路径：`DecodedImage.meta.width/height` 是**原图逻辑尺寸**，
   `preview_width/height` 是纹理尺寸（0 表示两者相同）；像素索引用
   `texture_width()/texture_height()`，不要用 `meta.width` 索引 `pixels`。

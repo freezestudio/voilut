@@ -755,39 +755,15 @@ namespace voilut::app
             return;
         }
 
-        // 预取 25% 边距：小幅平移命中同一细节纹理，减少重复区域读取。
-        constexpr double kPrefetchMargin = 1.25;
-        const uint32_t max_width = std::min(voilut::ImageRenderer::kDetailLayerSize, meta.width);
-        const uint32_t max_height = std::min(voilut::ImageRenderer::kDetailLayerSize, meta.height);
-        const uint32_t min_detail_width = std::min<uint32_t>(256, max_width);
-        const uint32_t min_detail_height = std::min<uint32_t>(256, max_height);
-        const uint32_t wanted_width = std::clamp<uint32_t>(
-            static_cast<uint32_t>(std::ceil((max_x - min_x) * kPrefetchMargin)),
-            min_detail_width, max_width);
-        const uint32_t wanted_height = std::clamp<uint32_t>(
-            static_cast<uint32_t>(std::ceil((max_y - min_y) * kPrefetchMargin)),
-            min_detail_height, max_height);
-        if (wanted_width == 0 || wanted_height == 0)
+        const auto planned = plan_detail_request(
+            state->detail_cache, meta.width, meta.height, min_x, min_y, max_x, max_y,
+            state->frame_index, voilut::ImageRenderer::kDetailLayerSize);
+        if (!planned)
         {
             state->detail_dirty = false;
             return;
         }
-        const double center_x = (min_x + max_x) * 0.5;
-        const double center_y = (min_y + max_y) * 0.5;
-        auto align = [](double value) {
-            return static_cast<uint32_t>(std::max(0.0, std::floor(value / 64.0) * 64.0));
-        };
-        uint32_t rx = align(center_x - wanted_width * 0.5);
-        uint32_t ry = align(center_y - wanted_height * 0.5);
-        rx = std::min(rx, meta.width - wanted_width);
-        ry = std::min(ry, meta.height - wanted_height);
-
-        const voilut::Rect request{
-            .x = static_cast<double>(rx),
-            .y = static_cast<double>(ry),
-            .width = static_cast<double>(wanted_width),
-            .height = static_cast<double>(wanted_height),
-        };
+        const voilut::Rect request = *planned;
 
         state->detail_dirty = false;
         ++state->detail_generation;

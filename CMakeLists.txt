@@ -498,6 +498,11 @@ if(BUILD_TESTING)
   target_include_directories(detail_cache_test PRIVATE apps imaging/include)
   target_compile_options(detail_cache_test PRIVATE ${PROJECT_WARNINGS})
   add_test(NAME detail_cache_test COMMAND detail_cache_test)
+
+  add_executable(detail_integration_test tests/detail_integration_test.cxx)
+  target_include_directories(detail_integration_test PRIVATE apps imaging/include)
+  target_compile_options(detail_integration_test PRIVATE ${PROJECT_WARNINGS})
+  add_test(NAME detail_integration_test COMMAND detail_integration_test)
 endif()
 
 # ------------------------------------------------------------

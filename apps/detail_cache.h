@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 #include "image_model.h"
@@ -139,4 +142,69 @@ namespace voilut::app
     private:
         std::array<DetailCacheEntry, kCapacity> entries_{};
     };
+
+    /// @brief 计算下一次细节读取请求（缓存已覆盖可见区域时返回 nullopt）。
+    /// @param cache 当前缓存。
+    /// @param image_width 原图宽。
+    /// @param image_height 原图高。
+    /// @param x0 可见区域左上 x（原图坐标）。
+    /// @param y0 可见区域左上 y。
+    /// @param x1 可见区域右下 x。
+    /// @param y1 可见区域右下 y。
+    /// @param frame 当前帧。
+    /// @param layer_size 细节纹理层边长（默认 2048）。
+    /// @return 需要读取的区域；不需要读取（已缓存 / 空区域）时返回 `std::nullopt`。
+    [[nodiscard]] inline std::optional<voilut::Rect> plan_detail_request(
+        const DetailCache &cache, uint32_t image_width, uint32_t image_height, double x0,
+        double y0, double x1, double y1, uint32_t frame, uint32_t layer_size = 2048)
+    {
+        if (image_width == 0 || image_height == 0)
+        {
+            return std::nullopt;
+        }
+        x0 = std::clamp(x0, 0.0, static_cast<double>(image_width));
+        x1 = std::clamp(x1, 0.0, static_cast<double>(image_width));
+        y0 = std::clamp(y0, 0.0, static_cast<double>(image_height));
+        y1 = std::clamp(y1, 0.0, static_cast<double>(image_height));
+        if (x1 - x0 < 1.0 || y1 - y0 < 1.0)
+        {
+            return std::nullopt;
+        }
+        if (cache.covers(x0, y0, x1, y1, frame))
+        {
+            return std::nullopt;
+        }
+
+        constexpr double kPrefetchMargin = 1.25;
+        const uint32_t max_width = std::min(layer_size, image_width);
+        const uint32_t max_height = std::min(layer_size, image_height);
+        const uint32_t min_width = std::min<uint32_t>(256, max_width);
+        const uint32_t min_height = std::min<uint32_t>(256, max_height);
+        const uint32_t wanted_width = std::clamp<uint32_t>(
+            static_cast<uint32_t>(std::ceil((x1 - x0) * kPrefetchMargin)), min_width,
+            max_width);
+        const uint32_t wanted_height = std::clamp<uint32_t>(
+            static_cast<uint32_t>(std::ceil((y1 - y0) * kPrefetchMargin)), min_height,
+            max_height);
+        if (wanted_width == 0 || wanted_height == 0)
+        {
+            return std::nullopt;
+        }
+
+        const double center_x = (x0 + x1) * 0.5;
+        const double center_y = (y0 + y1) * 0.5;
+        auto align = [](double value) {
+            return static_cast<uint32_t>(std::max(0.0, std::floor(value / 64.0) * 64.0));
+        };
+        uint32_t rx = align(center_x - wanted_width * 0.5);
+        uint32_t ry = align(center_y - wanted_height * 0.5);
+        rx = std::min(rx, image_width - wanted_width);
+        ry = std::min(ry, image_height - wanted_height);
+        return voilut::Rect{
+            .x = static_cast<double>(rx),
+            .y = static_cast<double>(ry),
+            .width = static_cast<double>(wanted_width),
+            .height = static_cast<double>(wanted_height),
+        };
+    }
 } // namespace voilut::app
