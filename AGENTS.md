@@ -138,7 +138,7 @@
   当前超大 TIFF / DICOM 由 `image_io::load_for_viewer` 走 `RegionSource::preview`，
   放大后由 `update_detail` 按需加载 1:1 细节（预取 25% 边距）。
   DICOM 区域读取用 `gdcm::ImageRegionReader`（元数据 `ReadInformation`，不加载 PixelData）；
-  预览仍用全量解码，受 `kMaxDecodeBytes` 限制。
+  预览：小图全量解码，大图按 4096×512 块流式读取并降采样（不再受 `kMaxDecodeBytes` 限制）。
   预览的自动窗统计：TIFF 流式路径累加全图抽样直方图；DICOM 沿用全量首帧统计，
   不要退化为只用预览像素统计（会受降采样影响）。
 - 区域读取（虚拟切片 Phase 0）：`imaging/include/region_source.h` +

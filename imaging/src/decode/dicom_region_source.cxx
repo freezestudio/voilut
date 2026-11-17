@@ -16,7 +16,6 @@
 #include <memory>
 #include <new>
 #include <optional>
-#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -110,6 +109,34 @@ namespace voilut
             return value;
         }
 
+        std::vector<double> read_ds_list(const gdcm::DataSet &dataset, const gdcm::Tag &tag)
+        {
+            std::vector<double> values;
+            const std::string text = read_string(dataset, tag);
+            size_t start = 0;
+            while (start <= text.size())
+            {
+                const size_t end = text.find('\\', start);
+                std::string part =
+                    text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                if (!part.empty())
+                {
+                    char *parse_end = nullptr;
+                    const double value = std::strtod(part.c_str(), &parse_end);
+                    if (parse_end != part.c_str())
+                    {
+                        values.push_back(value);
+                    }
+                }
+                if (end == std::string::npos)
+                {
+                    break;
+                }
+                start = end + 1;
+            }
+            return values;
+        }
+
         std::expected<RegionInfo, std::string> read_dicom_info(const std::string &path)
         {
             gdcm::ImageRegionReader reader;
@@ -187,6 +214,25 @@ namespace voilut
                 info.modality_unit = "HU";
             }
 
+            const auto centers = read_ds_list(dataset, gdcm::Tag(0x0028, 0x1050));
+            const auto widths = read_ds_list(dataset, gdcm::Tag(0x0028, 0x1051));
+            const size_t pairs = std::min(centers.size(), widths.size());
+            for (size_t i = 0; i < pairs; ++i)
+            {
+                if (widths[i] <= 0.0)
+                {
+                    continue;
+                }
+                info.window_presets.push_back(WindowSetting{
+                    .level = (centers[i] - intercept) / slope + offset,
+                    .width = std::max(widths[i] / slope, 1.0),
+                });
+            }
+            if (!info.window_presets.empty())
+            {
+                info.default_window = info.window_presets.front();
+            }
+
             // PixelPaddingValue / RangeLimit → 存储域排除区间。
             std::optional<double> padding_value;
             if (is_signed)
@@ -223,46 +269,6 @@ namespace voilut
             }
             (void)bits_stored;
             return info;
-        }
-
-        std::vector<uint16_t> downsample_u16(std::span<const uint16_t> src, uint32_t sw,
-                                             uint32_t sh, uint32_t factor, uint32_t &dw,
-                                             uint32_t &dh)
-        {
-            dw = std::max(1u, sw / factor);
-            dh = std::max(1u, sh / factor);
-            std::vector<uint16_t> dst(static_cast<size_t>(dw) * dh);
-            std::vector<uint64_t> sums(dw);
-            for (uint32_t oy = 0; oy < dh; ++oy)
-            {
-                std::fill(sums.begin(), sums.end(), 0);
-                const uint32_t y0 = oy * factor;
-                const uint32_t y1 = std::min(y0 + factor, sh);
-                for (uint32_t y = y0; y < y1; ++y)
-                {
-                    const uint16_t *row = src.data() + static_cast<size_t>(y) * sw;
-                    for (uint32_t ox = 0; ox < dw; ++ox)
-                    {
-                        const uint32_t x0 = ox * factor;
-                        const uint32_t x1 = std::min(x0 + factor, sw);
-                        uint64_t sum = 0;
-                        for (uint32_t x = x0; x < x1; ++x)
-                        {
-                            sum += row[x];
-                        }
-                        sums[ox] += sum;
-                    }
-                }
-                for (uint32_t ox = 0; ox < dw; ++ox)
-                {
-                    const uint32_t x0 = ox * factor;
-                    const uint32_t x1 = std::min(x0 + factor, sw);
-                    const uint64_t count = static_cast<uint64_t>(y1 - y0) * (x1 - x0);
-                    dst[static_cast<size_t>(oy) * dw + ox] =
-                        static_cast<uint16_t>((sums[ox] + count / 2) / count);
-                }
-            }
-            return dst;
         }
 
         class DicomRegionSource final : public RegionSource
@@ -378,57 +384,231 @@ namespace voilut
 
         std::expected<DecodedImage, std::string> DicomRegionSource::preview(uint32_t max_dimension)
         {
-            const uint64_t bytes_per_pixel = info_.bits_per_sample / 8;
-            const uint64_t total_bytes = static_cast<uint64_t>(info_.width) * info_.height *
-                                         info_.frame_count * bytes_per_pixel;
-            if (total_bytes > kMaxDecodeBytes)
-            {
-                return std::unexpected(std::string(
-                    "DICOM 过大：预览需要区域流式读取（尚未实现），请使用支持的区域格式"));
-            }
-
-            auto full = decode_dicom(path_);
-            if (!full)
-            {
-                return std::unexpected(full.error());
-            }
-            const auto &source = *full;
             max_dimension = std::max(1u, max_dimension);
-            const uint32_t factor =
-                std::max(1u, (std::max(source.meta.width, source.meta.height) + max_dimension - 1) /
-                                 max_dimension);
-            uint32_t width = 1;
-            uint32_t height = 1;
-            std::vector<uint16_t> pixels =
-                downsample_u16(source.frame_pixels(0), source.meta.width, source.meta.height,
-                               factor, width, height);
+            const uint32_t width = info_.width;
+            const uint32_t height = info_.height;
 
             DecodedImage preview;
-            preview.name = source.name;
+            preview.name = info_.name;
             preview.pixel_type = DecodedImage::PixelType::UInt16;
-            preview.preview_width = factor > 1 ? width : 0;
-            preview.preview_height = factor > 1 ? height : 0;
-            preview.initial_invert = source.initial_invert;
-            preview.default_window = source.default_window;
-            preview.window_presets = source.window_presets;
-            preview.padding = source.padding;
-            preview.scale = source.scale;
-            preview.modality_unit = source.modality_unit;
-            // 全量解码已得到首帧完整统计，直接沿用（包含填充值排除）。
+            preview.initial_invert = info_.initial_invert;
+            preview.default_window = info_.default_window;
+            preview.window_presets = info_.window_presets;
+            preview.padding = info_.padding;
+            preview.scale = info_.scale;
+            preview.modality_unit = info_.modality_unit;
+
+            // 小图直接全量解码；大图走按块区域读取 + 流式降采样。
+            if (std::max(width, height) <= max_dimension)
+            {
+                const uint64_t total_bytes = static_cast<uint64_t>(width) * height *
+                                             info_.frame_count * (info_.bits_per_sample / 8);
+                if (total_bytes > kMaxDecodeBytes)
+                {
+                    return std::unexpected(std::string("DICOM 过大：无法一次性解码预览"));
+                }
+                auto full = decode_dicom(path_);
+                if (!full)
+                {
+                    return std::unexpected(full.error());
+                }
+                const auto &source = *full;
+                preview.pixels.assign(source.frame_pixels(0).begin(),
+                                      source.frame_pixels(0).end());
+                preview.meta = {
+                    .width = source.meta.width,
+                    .height = source.meta.height,
+                    .bits_per_sample = info_.bits_per_sample,
+                    .samples_per_pixel = 1,
+                    .frame_count = 1,
+                    .is_float = false,
+                    .min_value = source.meta.min_value,
+                    .max_value = source.meta.max_value,
+                    .p1 = source.meta.p1,
+                    .p99 = source.meta.p99,
+                    .value_range = source.meta.value_range,
+                };
+                return preview;
+            }
+
+            const uint32_t scale = (std::max(width, height) + max_dimension - 1) / max_dimension;
+            const uint32_t out_width = std::max(1u, width / scale);
+            const uint32_t out_height = std::max(1u, height / scale);
+            const size_t out_count = static_cast<size_t>(out_width) * out_height;
+            const uint32_t step = std::max(1u, scale / 2);
+            preview.preview_width = out_width;
+            preview.preview_height = out_height;
+
+            std::vector<uint16_t> counts;
+            std::vector<uint64_t> sums;
+            std::vector<uint32_t> histogram;
+            try
+            {
+                counts.assign(out_count, 0);
+                sums.assign(out_count, 0);
+                histogram.assign(65536, 0);
+            }
+            catch (const std::bad_alloc &)
+            {
+                return std::unexpected(std::string("内存不足：无法分配 DICOM 预览缓冲区"));
+            }
+
+            gdcm::ImageRegionReader reader;
+            reader.SetFileName(path_.c_str());
+            if (!reader.ReadInformation())
+            {
+                return std::unexpected(std::string("无法读取 DICOM 信息（预览）"));
+            }
+
+            const uint32_t bytes_per_pixel = info_.bits_per_sample / 8;
+            const bool is_signed = info_.scale.storage_offset != 0.0;
+            const uint32_t chunk_width = std::min(width, 4096u);
+            const uint32_t chunk_height = std::min(height, 512u);
+            std::vector<char> buffer;
+
+            auto sample_value = [&](const char *data, size_t index) -> uint16_t {
+                if (info_.bits_per_sample == 8)
+                {
+                    const auto raw = static_cast<unsigned char>(data[index]);
+                    return is_signed
+                               ? static_cast<uint16_t>(static_cast<int32_t>(
+                                                         static_cast<int8_t>(raw)) +
+                                                         static_cast<int32_t>(kSignedOffset))
+                               : raw;
+                }
+                if (is_signed)
+                {
+                    int16_t value = 0;
+                    std::memcpy(&value, data + index * 2, sizeof(value));
+                    return static_cast<uint16_t>(static_cast<int32_t>(value) +
+                                                 static_cast<int32_t>(kSignedOffset));
+                }
+                uint16_t value = 0;
+                std::memcpy(&value, data + index * 2, sizeof(value));
+                return value;
+            };
+
+            for (uint32_t cy = 0; cy < height; cy += chunk_height)
+            {
+                for (uint32_t cx = 0; cx < width; cx += chunk_width)
+                {
+                    const uint32_t cw = std::min(chunk_width, width - cx);
+                    const uint32_t ch = std::min(chunk_height, height - cy);
+                    gdcm::BoxRegion region;
+                    region.SetDomain(cx, cx + cw - 1, cy, cy + ch - 1, 0, 0);
+                    reader.SetRegion(region);
+                    const size_t length = reader.ComputeBufferLength();
+                    if (length < static_cast<size_t>(cw) * ch * bytes_per_pixel)
+                    {
+                        return std::unexpected(std::string("DICOM 预览区域缓冲区异常"));
+                    }
+                    try
+                    {
+                        buffer.resize(length);
+                    }
+                    catch (const std::bad_alloc &)
+                    {
+                        return std::unexpected(std::string("内存不足：DICOM 预览块分配失败"));
+                    }
+                    if (!reader.ReadIntoBuffer(buffer.data(), length))
+                    {
+                        return std::unexpected(
+                            std::string("DICOM 预览区域读取失败（可能不支持该压缩语法）"));
+                    }
+
+                    const uint32_t gx0 = ((cx + step - 1) / step) * step;
+                    const uint32_t gy0 = ((cy + step - 1) / step) * step;
+                    for (uint32_t gy = gy0; gy < cy + ch; gy += step)
+                    {
+                        const size_t local_row = static_cast<size_t>(gy - cy) * cw;
+                        for (uint32_t gx = gx0; gx < cx + cw; gx += step)
+                        {
+                            const uint16_t value =
+                                sample_value(buffer.data(), local_row + (gx - cx));
+                            const uint32_t ox = gx / scale;
+                            const uint32_t oy = gy / scale;
+                            if (ox >= out_width || oy >= out_height)
+                            {
+                                continue;
+                            }
+                            const size_t index = static_cast<size_t>(oy) * out_width + ox;
+                            sums[index] += value;
+                            ++counts[index];
+                            if (!info_.padding.contains(value))
+                            {
+                                ++histogram[value];
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::vector<uint16_t> pixels(out_count);
+            size_t source_count = 0;
+            uint32_t source_min = 65535;
+            uint32_t source_max = 0;
+            for (size_t i = 0; i < 65536; ++i)
+            {
+                if (histogram[i] == 0)
+                {
+                    continue;
+                }
+                source_count += histogram[i];
+                source_min = std::min(source_min, static_cast<uint32_t>(i));
+                source_max = std::max(source_max, static_cast<uint32_t>(i));
+            }
+            if (source_count == 0)
+            {
+                return std::unexpected(std::string("DICOM 预览没有有效像素"));
+            }
+            const size_t rank = std::max<size_t>(1, source_count / 100);
+            uint32_t p1 = source_min;
+            uint32_t p99 = source_max;
+            bool found = false;
+            uint64_t acc = 0;
+            for (uint32_t value = 0; value < 65536; ++value)
+            {
+                acc += histogram[value];
+                if (!found && acc >= rank)
+                {
+                    p1 = value;
+                    found = true;
+                }
+            }
+            acc = 0;
+            for (int value = 65535; value >= 0; --value)
+            {
+                acc += histogram[static_cast<size_t>(value)];
+                if (acc >= rank)
+                {
+                    p99 = static_cast<uint32_t>(value);
+                    break;
+                }
+            }
+            if (p99 <= p1)
+            {
+                p99 = p1 + 1;
+            }
+            for (size_t i = 0; i < out_count; ++i)
+            {
+                pixels[i] = counts[i] == 0
+                                ? 0
+                                : static_cast<uint16_t>((sums[i] + counts[i] / 2) / counts[i]);
+            }
+            preview.pixels = std::move(pixels);
             preview.meta = {
-                .width = source.meta.width,
-                .height = source.meta.height,
+                .width = width,
+                .height = height,
                 .bits_per_sample = info_.bits_per_sample,
                 .samples_per_pixel = 1,
                 .frame_count = 1,
                 .is_float = false,
-                .min_value = source.meta.min_value,
-                .max_value = source.meta.max_value,
-                .p1 = source.meta.p1,
-                .p99 = source.meta.p99,
-                .value_range = source.meta.value_range,
+                .min_value = static_cast<double>(source_min),
+                .max_value = static_cast<double>(source_max),
+                .p1 = static_cast<double>(p1),
+                .p99 = static_cast<double>(p99),
+                .value_range = static_cast<double>(source_max - source_min),
             };
-            preview.pixels = std::move(pixels);
             return preview;
         }
     } // namespace

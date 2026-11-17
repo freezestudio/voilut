@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,8 @@ namespace voilut
         bool initial_invert = false;  ///< MINISWHITE / MONOCHROME1。
         ValueScale scale;              ///< 存储域 ↔ 模态值。
         ValueExclusion padding;        ///< 需要排除的填充值。
+        std::optional<WindowSetting> default_window; ///< 文件自带默认窗。
+        std::vector<WindowSetting> window_presets;   ///< 文件自带的多组窗值。
         std::string name;              ///< 文件名。
         std::string modality_unit;     ///< 模态单位（如 HU）。
     };
