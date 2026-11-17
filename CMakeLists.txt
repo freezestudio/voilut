@@ -27,7 +27,7 @@ if(WIN32 AND NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
   message(STATUS "使用 vcpkg 工具链：${CMAKE_TOOLCHAIN_FILE}")
 endif()
 
-project(voilut LANGUAGES CXX)
+project(voilut VERSION 0.1.0 LANGUAGES CXX)
 
 # ------------------------------------------------------------
 # 编译器运行时库 RPATH（仅 Linux/macOS）
@@ -425,6 +425,7 @@ endif()
 # ------------------------------------------------------------
 add_executable(windower apps/windower.cxx)
 target_compile_options(windower PRIVATE ${PROJECT_WARNINGS})
+target_compile_definitions(windower PRIVATE VOILUT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(windower PRIVATE voilut imgui)
 
 if(VOILUT_PORTABLE AND UNIX AND NOT APPLE)

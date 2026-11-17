@@ -72,6 +72,10 @@
 #include "viewport.h"
 #include "window.h"
 
+#ifndef VOILUT_VERSION
+#define VOILUT_VERSION "0.0.0"
+#endif
+
 namespace
 {
     // ------------------------------------------------------------
@@ -2059,6 +2063,16 @@ namespace
         ImGui::PopStyleVar();
     }
 
+    /// @brief 打印命令行用法。
+    void print_usage(const char *program)
+    {
+        std::println("用法: {} <图像文件或目录> [更多文件/目录 ...]", program);
+        std::println("  支持 .tif / .tiff / .dcm；目录会展开为其中的图像");
+        std::println("  无参数启动时，可在窗口内通过「打开文件夹...」选择图像");
+        std::println("  --help, -h   显示本帮助");
+        std::println("  --version    显示版本");
+    }
+
     /// @brief 由启动参数构建图像列表：目录展开为其中的图像，文件按原样收集。
     std::vector<std::string> build_playlist(const std::vector<std::string> &args)
     {
@@ -2097,12 +2111,23 @@ int main(int argc, char **argv)
 #endif
 
     const std::vector<std::string> args(argv + 1, argv + argc);
+    for (const std::string &arg : args)
+    {
+        if (arg == "--help" || arg == "-h")
+        {
+            print_usage(argv[0]);
+            return EXIT_SUCCESS;
+        }
+        if (arg == "--version")
+        {
+            std::println("Windower {}", VOILUT_VERSION);
+            return EXIT_SUCCESS;
+        }
+    }
     std::vector<std::string> playlist = build_playlist(args);
     if (!args.empty() && playlist.empty())
     {
-        std::println("用法: {} <图像文件或目录> [更多文件/目录 ...]", argv[0]);
-        std::println("  支持 .tif / .tiff / .dcm；目录会展开为其中的图像");
-        std::println("  无参数启动时，可在窗口内通过「打开文件夹...」选择图像。");
+        print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 

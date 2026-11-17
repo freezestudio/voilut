@@ -88,6 +88,7 @@ bash scripts/install_deps.sh        # = install_dawn.sh + install_gdcm.sh + inst
 cmake -B build -G Ninja
 cmake --build build
 ctest --test-dir build              # 纯计算单测 + TIFF 解码回归（无需 GPU）
+./build/windower --version         # 版本
 ./build/windower 图像.tif          # 或 .dcm
 ./build/windower ./samples/一组图像/  # 目录会展开成图像列表
 ./build/windower                   # 无参数：窗口内「打开文件夹...」或拖放
@@ -120,6 +121,12 @@ cmake -B build-release -G Ninja \
   -DVOILUT_EMBED_SHADERS=ON
 cmake --build build-release
 strip --strip-all build-release/windower    # 可选：去掉调试符号
+```
+
+也可以直接用脚本（构建 + CTest + strip + 依赖检查）：
+
+```bash
+bash scripts/build_linux.sh        # 产物：dist/windower
 ```
 
 - `VOILUT_EMBED_SHADERS=ON`：CMake 把 `shaders/*.wgsl` 转成 C++ 字节数组

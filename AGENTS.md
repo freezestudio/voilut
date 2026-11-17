@@ -151,6 +151,12 @@
 - Windows 一键发行：
   `powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 -VcpkgRoot <vcpkg>`。
   脚本会安装静态依赖、构建、检查非系统 DLL 依赖并复制到 `dist/`。
+- Linux 一键发行：`bash scripts/build_linux.sh`（构建 + CTest + strip + 依赖检查，
+  产物 `dist/windower`）。
+- 版本号在 `CMakeLists.txt` 的 `project(voilut VERSION ...)`，通过
+  `VOILUT_VERSION` 宏传给 `windower`；`--version` / `--help` 走这条路径。
+- CI：`.github/workflows/ci.yml` 是秒级的 model-only 门禁（Linux + Windows）；
+  `.github/workflows/release-linux.yml` 是手动触发的完整单文件发行流水线。
 
 ## 文档约定
 

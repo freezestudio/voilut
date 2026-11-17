@@ -1,0 +1,40 @@
+# ============================================================
+# Linux 单文件发行（手动触发）
+# ============================================================
+# 完整构建需要 Dawn / GDCM / ImGui（约 800 MB，首次编译 5~20 分钟），
+# 因此不在每次 push 时运行，只作为发版前的手动流水线。
+# 缓存 third_party/ 后，后续运行的增量编译会快很多。
+name: Release Linux (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache third_party
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/install_dawn.sh', 'scripts/install_gdcm.sh', 'scripts/install_imgui.sh') }}
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtiff-dev ninja-build
+
+      - name: Fetch dependencies
+        run: bash scripts/install_deps.sh
+
+      - name: Build single-file binary
+        run: bash scripts/build_linux.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windower-linux-x86_64
+          path: dist/windower
+          if-no-files-found: error
