@@ -125,6 +125,10 @@
 - 模态值：内部像素仍是存储域（有符号 +32768，uint16 纹理）；UI 的窗位/窗宽、探针、
   ROI 记录必须经 `ValueScale::to_modality` / `to_storage` / `width_to_*` 换算。
   `display_ratio` 与着色器继续使用存储域，不要混用。CT 的 RescaleType 会显示为 HU。
+- 区域读取（虚拟切片 Phase 0）：`imaging/include/region_source.h` +
+  `imaging/src/decode/tiff_region_source.cxx`。libtiff 的 `TIFFReadScanline/TIFFReadTile`
+  **已经返回本机字节序**，不要再手动 `TIFFIsByteSwapped` 交换（会双重交换）；
+  写大端 fixture 时必须拷贝行再 `TIFFWriteScanline`，因为它会原地交换输入缓冲区。
 - DICOM 语义：多组 `WindowCenter/WindowWidth` 存入 `DecodedImage::window_presets`
   （第一个作为默认窗）；`PixelPaddingValue` / `PixelPaddingRangeLimit` 换算到存储域后
   存入 `padding`，统计 / 直方图 / ROI 必须传 `ValueExclusion`，新增统计路径也不例外。

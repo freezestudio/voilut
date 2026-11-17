@@ -29,29 +29,6 @@ namespace voilut
         /// @brief TIFF 句柄的 RAII 包装（退出时自动 TIFFClose）。
         using TiffHandle = std::unique_ptr<TIFF, decltype(&TIFFClose)>;
 
-        /// @brief 16 位像素字节交换（大端 TIFF 需要）。
-        void swap_bytes_16(uint16_t *values, size_t count) noexcept
-        {
-            for (size_t i = 0; i < count; ++i)
-            {
-                const uint16_t value = values[i];
-                values[i] = static_cast<uint16_t>((value >> 8) | (value << 8));
-            }
-        }
-
-        /// @brief 32 位浮点像素字节交换（大端浮点 TIFF）。
-        void swap_bytes_32(float *values, size_t count) noexcept
-        {
-            for (size_t i = 0; i < count; ++i)
-            {
-                uint32_t bits = 0;
-                std::memcpy(&bits, &values[i], sizeof(bits));
-                bits = (bits >> 24) | ((bits >> 8) & 0x0000ff00u) |
-                       ((bits << 8) & 0x00ff0000u) | (bits << 24);
-                std::memcpy(&values[i], &bits, sizeof(bits));
-            }
-        }
-
         /// @brief 取路径中的文件名部分。
         std::string file_name_of(const std::string &path)
         {
@@ -85,7 +62,6 @@ namespace voilut
                                                    uint16_t bits_per_sample, uint16_t *dst)
         {
             const size_t bytes_per_pixel = bits_per_sample / 8;
-            const bool byte_swapped = TIFFIsByteSwapped(tif) != 0;
 
             if (TIFFIsTiled(tif))
             {
@@ -132,10 +108,6 @@ namespace voilut
                             else
                             {
                                 std::memcpy(row, src, static_cast<size_t>(copy_width) * 2);
-                                if (byte_swapped)
-                                {
-                                    swap_bytes_16(row, copy_width);
-                                }
                             }
                         }
                     }
@@ -167,10 +139,6 @@ namespace voilut
                 else
                 {
                     std::memcpy(dst_row, row_buffer.data(), static_cast<size_t>(width) * 2);
-                    if (byte_swapped)
-                    {
-                        swap_bytes_16(dst_row, width);
-                    }
                 }
             }
             return {};
@@ -186,7 +154,6 @@ namespace voilut
                                                          uint32_t height, float *dst)
         {
             constexpr size_t kBytesPerPixel = sizeof(float);
-            const bool byte_swapped = TIFFIsByteSwapped(tif) != 0;
 
             if (TIFFIsTiled(tif))
             {
@@ -224,10 +191,6 @@ namespace voilut
                                                      kBytesPerPixel;
                             float *row = dst + static_cast<size_t>(y0 + ty) * width + x0;
                             std::memcpy(row, src, static_cast<size_t>(copy_width) * kBytesPerPixel);
-                            if (byte_swapped)
-                            {
-                                swap_bytes_32(row, copy_width);
-                            }
                         }
                     }
                 }
@@ -249,10 +212,6 @@ namespace voilut
                 }
                 float *dst_row = dst + static_cast<size_t>(row) * width;
                 std::memcpy(dst_row, row_buffer.data(), static_cast<size_t>(width) * kBytesPerPixel);
-                if (byte_swapped)
-                {
-                    swap_bytes_32(dst_row, width);
-                }
             }
             return {};
         }

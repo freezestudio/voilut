@@ -368,6 +368,7 @@ add_library(voilut STATIC
   imaging/src/orientation.cxx
   imaging/src/decode/image_decode.cxx
   imaging/src/decode/tiff_decode.cxx
+  imaging/src/decode/tiff_region_source.cxx
   imaging/src/decode/dicom_decode.cxx
 )
 target_include_directories(voilut PUBLIC imaging/include)
@@ -480,6 +481,16 @@ if(BUILD_TESTING)
   target_compile_options(decode_test PRIVATE ${PROJECT_WARNINGS})
   target_link_libraries(decode_test PRIVATE voilut_model ${TIFF_LINK_LIBRARIES})
   add_test(NAME decode_test COMMAND decode_test)
+
+  add_executable(region_source_test
+    tests/region_source_test.cxx
+    imaging/src/decode/tiff_region_source.cxx
+    imaging/src/decode/tiff_decode.cxx
+  )
+  target_include_directories(region_source_test PRIVATE imaging/include)
+  target_compile_options(region_source_test PRIVATE ${PROJECT_WARNINGS})
+  target_link_libraries(region_source_test PRIVATE voilut_model ${TIFF_LINK_LIBRARIES})
+  add_test(NAME region_source_test COMMAND region_source_test)
 endif()
 
 # ------------------------------------------------------------

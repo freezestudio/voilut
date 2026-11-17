@@ -64,9 +64,13 @@ namespace
     bool write_scanline_16(TIFF *tif, uint32_t width, uint32_t height,
                            const std::vector<uint16_t> &pixels)
     {
+        // 拷贝一行再写入：libtiff 写大端文件时会原地交换输入缓冲区。
+        std::vector<uint16_t> row(width);
         for (uint32_t y = 0; y < height; ++y)
         {
-            if (TIFFWriteScanline(tif, const_cast<uint16_t *>(pixels.data() + y * width), y, 0) < 0)
+            std::copy_n(pixels.begin() + static_cast<std::ptrdiff_t>(y) * width, width,
+                        row.begin());
+            if (TIFFWriteScanline(tif, row.data(), y, 0) < 0)
             {
                 return false;
             }
@@ -227,7 +231,7 @@ int main()
         }
         if (auto image = decode(path))
         {
-            check(same_pixels(image->pixels, pixels), "字节交换后像素值一致");
+            check(same_pixels(image->pixels, pixels), "大端文件按本机字节序解码");
         }
     }
 

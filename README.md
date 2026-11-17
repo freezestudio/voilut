@@ -231,6 +231,7 @@ imaging/   窗宽窗位核心（静态库 voilut；纯计算部分为 voilut_mod
                           （独立静态库 voilut_model，不链接 Dawn，可无 GPU 测试）
            image_renderer Dawn 渲染管线（uniform 即 WindowParams）
            decode/        TIFF（libtiff）/ DICOM（GDCM）/ 后缀分派
+                          region_source 区域读取（虚拟切片 Phase 0）
            viewport       缩放平移；orientation 旋转翻转
 
 apps/      Windower 可执行程序（按职责拆分）
