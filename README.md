@@ -233,7 +233,13 @@ imaging/   窗宽窗位核心（静态库 voilut；纯计算部分为 voilut_mod
            decode/        TIFF（libtiff）/ DICOM（GDCM）/ 后缀分派
            viewport       缩放平移；orientation 旋转翻转
 
-apps/      windower.cxx —— 可执行程序 windower
+apps/      Windower 可执行程序（按职责拆分）
+           windower.cxx   入口 / 窗口与 WebGPU 初始化 / 主循环
+           app_state.h    共享应用状态
+           app_ops.cxx    窗值、视口、ROI、帧切换
+           image_io.cxx   播放列表、后台解码、目录选择
+           input.cxx      GLFW 输入回调
+           ui.cxx         菜单 / 调窗面板 / 直方图 / 叠层
 shaders/   image.wgsl  —— 窗宽窗位映射的实现
 tests/     window_model_test.cxx —— 调窗与 VOI 公式单测（CTest）
            decode_test.cxx       —— TIFF 解码回归（fixtures 由测试现场生成）

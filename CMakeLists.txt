@@ -423,7 +423,13 @@ endif()
 # ------------------------------------------------------------
 # windower：可执行程序
 # ------------------------------------------------------------
-add_executable(windower apps/windower.cxx)
+add_executable(windower
+  apps/windower.cxx
+  apps/app_ops.cxx
+  apps/image_io.cxx
+  apps/input.cxx
+  apps/ui.cxx
+)
 target_compile_options(windower PRIVATE ${PROJECT_WARNINGS})
 target_compile_definitions(windower PRIVATE VOILUT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(windower PRIVATE voilut imgui)

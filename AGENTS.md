@@ -35,7 +35,11 @@
   - `image_renderer.*`：Dawn 管线；`WindowParams` 必须与 `shaders/image.wgsl`
     的 `WindowParams` 逐字段一致（32 字节，补齐 padding）。
   - `decode/`：格式分派 + TIFF（libtiff）+ DICOM（GDCM）。
-- `apps/`：可执行入口。UI 只调库，不重复实现映射逻辑。
+- `apps/`：可执行入口。UI 只调库，不重复实现映射逻辑。已按职责拆分：
+  `app_state.h`（共享状态）、`app_ops.cxx`（窗值/视口/ROI/帧）、
+  `image_io.cxx`（播放列表与异步解码）、`input.cxx`（GLFW 回调）、
+  `ui.cxx`（菜单/面板/直方图/叠层）、`windower.cxx`（入口与主循环）。
+  新增交互时优先放进对应文件，不要重新堆回 `windower.cxx`。
 - `shaders/`：WGSL。**映射公式改动必须同时改 CPU 侧**（`display_ratio`），
   并保持注释里互相引用的说法一致。
 - `third_party/`：不入库（见 `.gitignore`）。Dawn / GDCM 由 `scripts/*.sh` 获取。
