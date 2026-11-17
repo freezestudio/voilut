@@ -185,6 +185,9 @@
   产物 `dist/windower`）。
 - 版本号在 `CMakeLists.txt` 的 `project(voilut VERSION ...)`，通过
   `VOILUT_VERSION` 宏传给 `windower`；`--version` / `--help` 走这条路径。
+- Windows 实机回归清单：`docs/windows-regression.md`（构建、单文件依赖、D3D12、
+  虚拟切片细节/缓存、DICOM 区域读取、HiDPI）。合成 DICOM 用
+  `python scripts/make_test_dicom.py <out.dcm> <宽> <高>`。
 - CI：`.github/workflows/ci.yml` 是秒级的 model-only 门禁（Linux + Windows）；
   `.github/workflows/release-linux.yml` / `release-windows.yml` 是手动触发的完整
   单文件发行流水线（会缓存 third_party 与 vcpkg）。

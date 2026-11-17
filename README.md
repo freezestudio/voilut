@@ -289,6 +289,12 @@ doxygen Doxyfile        # 或 cmake --build build --target docs
 xdg-open build/doxygen/html/index.html
 ```
 
+另见：
+
+- `docs/virtual-tiling.md`：虚拟切片（超大图像）设计与分阶段实现；
+- `docs/windows-regression.md`：Windows 实机回归清单（含单文件/D3D12/缓存/细节纹理）；
+- `scripts/make_test_dicom.py`：生成合成 DICOM 测试文件（无第三方依赖）。
+
 头文件注释采用 Doxygen 风格（中文），是查阅接口的主要入口。
 
 ---
