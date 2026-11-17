@@ -35,9 +35,10 @@ voilut 把这一流程拆成可复用的库：解码 → 统计 → 定窗 → G
 - **ROI 记录**：把当前 ROI 以原图坐标保存，操作记录面板显示区域、尺寸与窗值
 - **菜单栏**：文件 / 图像 / 视图，支持打开目录、重置、预设窗与面板显隐
 - **探针**：悬停显示原始像素值及经窗映射后的显示灰度
-- **解码**：TIFF（libtiff，8/16 位灰度、stripped / tiled、多页计数、大端、MINISWHITE、
+- **解码**：TIFF（libtiff，8/16 位灰度、stripped / tiled、多页、大端、MINISWHITE、
   常见压缩）、DICOM（GDCM，含压缩传输语法、WindowCenter/WindowWidth 标签、
-  Rescale Slope/Intercept）；浮点 TIFF 与多帧/多页文件目前只显示第 1 帧
+  Rescale Slope/Intercept）；多页 / 多帧可用滑块或 `,` `.` 逐帧切换（受内存上限）；
+  浮点 TIFF 暂不支持
 - **Windows / Linux**：Dawn（Vulkan / D3D12）统一后端，两个平台共用同一套代码
 - **高 DPI 布局**：按系统内容缩放同步放大窗口、ImGui 样式、字体与面板固定尺寸，
   4K/200% 下仍保持 1280×720 的逻辑布局和可读字号
@@ -185,6 +186,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 `
 | `I` / `L` | 反色 / 双线性插值 |
 | `R` / `H` / `V` | 旋转 90° / 水平翻转 / 垂直翻转 |
 | `[` / `]` | 上一张 / 下一张 |
+| `,` / `.` | 上一帧 / 下一帧（多页 TIFF、多帧 DICOM，也可拖面板滑块） |
 | `Q` / `Esc` / `Ctrl + Q` | 退出 |
 
 面板里还有滑块、数值输入和直方图拖动；勾选「记住窗值」后，

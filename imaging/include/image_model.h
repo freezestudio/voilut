@@ -50,10 +50,24 @@ namespace voilut
     struct DecodedImage
     {
         std::string name;                              ///< 文件名 / 数据源名。
-        ImageMeta meta;                                ///< 元数据与统计。
-        std::vector<uint16_t> pixels;                  ///< 16 位像素（行优先）。
+        ImageMeta meta;                                ///< 元数据与统计（首帧）。
+        /// 16 位像素（行优先，连续存所有帧）：第 f 帧从 `f * width * height` 开始。
+        /// 单帧图像长度 = width * height。
+        std::vector<uint16_t> pixels;
         std::optional<WindowSetting> default_window;   ///< 文件自带的默认窗（DICOM）。
         bool initial_invert = false;                   ///< 初始是否反色（MONOCHROME1）。
+
+        /// @brief 取指定帧的像素视图（越界返回空 span）。
+        /// @param index 帧序号（0-based）。
+        [[nodiscard]] std::span<const uint16_t> frame_pixels(uint32_t index) const noexcept
+        {
+            if (index >= meta.frame_count || meta.width == 0 || meta.height == 0)
+            {
+                return {};
+            }
+            const size_t count = static_cast<size_t>(meta.width) * meta.height;
+            return {pixels.data() + count * index, count};
+        }
     };
 
     /// @brief 像素统计结果。

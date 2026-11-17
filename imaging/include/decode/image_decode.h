@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <expected>
 #include <optional>
 #include <string>
@@ -13,6 +14,10 @@
 
 namespace voilut
 {
+    /// @brief 解码时允许的最大像素内存（多帧 / 多页超过时只加载前 N 帧）。
+    /// @details 多帧需要一次性读入 GDCM 缓冲区，超出上限的巨型序列应先做降采样或
+    ///          按需分帧解码（尚未实现）。
+    inline constexpr size_t kMaxDecodeBytes = 1'500'000'000;
     /// @brief 图像类型。
     enum class ImageKind
     {

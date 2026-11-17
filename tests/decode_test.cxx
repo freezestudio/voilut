@@ -1,7 +1,7 @@
 /// @file decode_test.cxx
 /// @brief TIFF 解码回归测试（fixtures 由 libtiff 在临时目录现场生成，不入库）。
 /// @details 覆盖：stripped / tiled、小端 / 大端、8 位 / 16 位、MINISWHITE、多页计数、
-///          浮点 TIFF 拒绝。多页文件目前只解码第 1 页，但 `meta.frame_count` 必须正确。
+///          浮点 TIFF 拒绝；多页文件逐帧校验（受 kMaxDecodeBytes 限制）。
 
 #include "decode/tiff_decode.h"
 
@@ -274,7 +274,13 @@ int main()
         if (auto image = decode(path))
         {
             check(image->meta.frame_count == 2, "frame_count = 2");
-            check(same_pixels(image->pixels, page0), "默认解码第 1 页");
+            const auto first = image->frame_pixels(0);
+            const auto second = image->frame_pixels(1);
+            check(same_pixels(std::vector<uint16_t>(first.begin(), first.end()), page0),
+                  "第 1 帧内容正确");
+            check(same_pixels(std::vector<uint16_t>(second.begin(), second.end()), page1),
+                  "第 2 帧内容正确");
+            check(image->frame_pixels(2).empty(), "越界帧返回空 span");
         }
     }
 

@@ -10,8 +10,11 @@
 #include <format>
 #include <new> // std::bad_alloc
 #include <optional>
+#include <print>
 #include <string>
 #include <vector>
+
+#include "decode/image_decode.h" // kMaxDecodeBytes
 
 #include <gdcmByteValue.h>
 #include <gdcmDataElement.h>
@@ -125,39 +128,55 @@ namespace voilut
                     std::format("仅支持 8 位或 16 位灰度 DICOM，当前为 {} 位", bits_allocated));
             }
 
-            // GDCM 已按传输语法解压，此处得到的是原始像素字节；统一转换为 16 位
+            // GDCM 已按传输语法解压，此处得到的是原始像素字节；统一转换为 16 位。
+            // 多帧时按 `frame_count` 连续存放（第 f 帧从 f*count 开始）。
             const size_t count = static_cast<size_t>(width) * height;
-            std::vector<uint16_t> pixels(count);
-            if (bits_allocated == 8)
+            const uint32_t frames = std::max(1u, frame_count);
+            const size_t bytes_per_frame = count * (bits_allocated / 8);
+            std::vector<uint16_t> pixels;
+            try
             {
-                for (size_t i = 0; i < count; ++i)
-                {
-                    if (is_signed)
-                    {
-                        pixels[i] = static_cast<uint16_t>(
-                            static_cast<int32_t>(static_cast<int8_t>(raw[i])) +
-                            static_cast<int32_t>(kSignedOffset));
-                    }
-                    else
-                    {
-                        pixels[i] = raw[i];
-                    }
-                }
+                pixels.resize(count * frames);
             }
-            else
+            catch (const std::bad_alloc &)
             {
-                if (is_signed)
+                return std::unexpected(
+                    std::format("内存不足：无法为 {}×{}×{} 帧分配像素缓冲区", width, height,
+                                frames));
+            }
+
+            for (uint32_t frame = 0; frame < frames; ++frame)
+            {
+                const uint8_t *frame_raw = raw + static_cast<size_t>(frame) * bytes_per_frame;
+                uint16_t *dst = pixels.data() + static_cast<size_t>(frame) * count;
+                if (bits_allocated == 8)
                 {
-                    const auto *source = reinterpret_cast<const int16_t *>(raw);
                     for (size_t i = 0; i < count; ++i)
                     {
-                        pixels[i] = static_cast<uint16_t>(static_cast<int32_t>(source[i]) +
+                        if (is_signed)
+                        {
+                            dst[i] = static_cast<uint16_t>(
+                                static_cast<int32_t>(static_cast<int8_t>(frame_raw[i])) +
+                                static_cast<int32_t>(kSignedOffset));
+                        }
+                        else
+                        {
+                            dst[i] = frame_raw[i];
+                        }
+                    }
+                }
+                else if (is_signed)
+                {
+                    const auto *source = reinterpret_cast<const int16_t *>(frame_raw);
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        dst[i] = static_cast<uint16_t>(static_cast<int32_t>(source[i]) +
                                                           static_cast<int32_t>(kSignedOffset));
                     }
                 }
                 else
                 {
-                    std::memcpy(pixels.data(), raw, count * sizeof(uint16_t));
+                    std::memcpy(dst, frame_raw, count * sizeof(uint16_t));
                 }
             }
 
@@ -177,7 +196,8 @@ namespace voilut
                 };
             }
 
-            const ImageStats stats = compute_stats(pixels);
+            const ImageStats stats = compute_stats(
+                std::span<const uint16_t>(pixels.data(), count));
             DecodedImage result;
             result.name = file_name_of(path);
             result.meta = {
@@ -260,6 +280,23 @@ namespace voilut
                         "DICOM 像素缓冲区异常：需要至少 {} 字节，实际 {} 字节", expected,
                         buffer_length));
                 }
+                if (buffer_length > kMaxDecodeBytes)
+                {
+                    return std::unexpected(std::format(
+                        "DICOM 像素数据过大（{} 字节，上限 {}）：需要按需分帧解码",
+                        buffer_length, kMaxDecodeBytes));
+                }
+                // GDCM 缓冲区必须全量分配（GetBuffer 会写全部帧）；像素副本再受剩余预算限制。
+                const size_t budget = kMaxDecodeBytes - buffer_length;
+                const size_t max_frames_by_budget =
+                    std::max<size_t>(1, budget / (count * sizeof(uint16_t)));
+                const unsigned int loaded_frames = static_cast<unsigned int>(
+                    std::min<size_t>(frame_count, max_frames_by_budget));
+                if (loaded_frames < frame_count)
+                {
+                    std::println("警告: DICOM 共 {} 帧，受内存上限限制仅加载前 {} 帧", frame_count,
+                                 loaded_frames);
+                }
                 std::vector<uint8_t> buffer;
                 try
                 {
@@ -279,7 +316,7 @@ namespace voilut
                 return assemble_decoded(path, buffer.data(), width, height, bits_allocated,
                                         bits_stored, is_signed,
                                         photo == gdcm::PhotometricInterpretation::MONOCHROME1,
-                                        frame_count, reader.GetFile().GetDataSet());
+                                        loaded_frames, reader.GetFile().GetDataSet());
             }
         }
 
@@ -348,14 +385,24 @@ namespace voilut
             {
                 return std::unexpected(std::string("DICOM 像素数据长度不足"));
             }
-            // 未知 SOP 的兼容路径按原始长度推算帧数（只解码第 1 帧）。
+            // 未知 SOP 的兼容路径按原始长度推算帧数；像素副本受内存上限限制。
             const unsigned int frame_count = static_cast<unsigned int>(
                 std::max<size_t>(1, pixel_bytes->GetLength() / std::max<size_t>(1, frame_bytes)));
+            const size_t max_frames = std::max<size_t>(
+                1, kMaxDecodeBytes /
+                       std::max<size_t>(1, static_cast<size_t>(*columns) * *rows * sizeof(uint16_t)));
+            const unsigned int loaded_frames =
+                static_cast<unsigned int>(std::min<size_t>(frame_count, max_frames));
+            if (loaded_frames < frame_count)
+            {
+                std::println("警告: DICOM 共 {} 帧，受内存上限限制仅加载前 {} 帧", frame_count,
+                             loaded_frames);
+            }
 
             return assemble_decoded(
                 path, reinterpret_cast<const uint8_t *>(pixel_bytes->GetPointer()), *columns, *rows,
                 *bits_allocated, bits_stored, pixel_representation != 0,
-                photometric == "MONOCHROME1", frame_count, dataset);
+                photometric == "MONOCHROME1", loaded_frames, dataset);
         }
     }
 } // namespace voilut

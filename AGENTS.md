@@ -101,9 +101,13 @@
   `ImageRenderer::upload` 返回 `expected`，超限/内存不足必须走错误弹窗，不得忽略。
 - mipmap 由 CPU 盒式滤波生成（`r16uint` 不能由采样器生成），着色器按 UV 导数选 LOD；
   缩图质量依赖这条链，不要回退成只读 level 0。
-- TIFF：tiled、多页计数、大端字节交换、`PHOTOMETRIC_MINISWHITE` 均已处理；
-  多帧 DICOM 必须按 `GetBufferLength()` 全量分配（目前只显示第 1 帧），
+- TIFF：tiled、多页（逐页解码并校验尺寸）、大端字节交换、`PHOTOMETRIC_MINISWHITE`；
+  多页 / 多帧受 `kMaxDecodeBytes` 限制（超出时只加载前 N 帧并告警）。
+  多帧 DICOM 必须按 `GetBufferLength()` 全量分配（再逐帧转换），
   按单帧分配会堆溢出。浮点 TIFF 明确拒绝。
+- 帧导航：`DecodedImage::frame_pixels(index)` 是唯一取帧入口；切换帧只重传纹理并重算该帧
+  统计/直方图，窗值保持不变（z-stack 对比）。不要把 `image->pixels` 当单帧传给
+  `compute_histogram` / `window_for_roi` / `pixel_at`。
 
 ## 发行构建（单文件）
 

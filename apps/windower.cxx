@@ -143,6 +143,9 @@ namespace
         std::vector<RoiRecord> roi_records;
         std::size_t next_roi_id = 1;
 
+        // 多页 / 多帧文件的当前帧（0-based）。
+        uint32_t frame_index = 0;
+
         // 面板显隐（菜单栏可切换）。
         bool show_control_panel = true;
         bool show_history_panel = true;
@@ -245,6 +248,9 @@ namespace
         }
     }
 
+    /// @brief 切换多页 / 多帧文件的当前帧（定义在 apply_image 之后）。
+    void set_frame(AppState *state, uint32_t frame);
+
     /// @brief 适应视口（等比缩放并居中）。
     void fit_to_window(AppState *state)
     {
@@ -338,6 +344,11 @@ namespace
         }
         // 当前图像不再保留会话内的窗值记忆。
         state->remembered.erase(state->current_path);
+        // 重置图像同时回到首帧（恢复打开时的状态）。
+        if (state->frame_index != 0)
+        {
+            set_frame(state, 0);
+        }
 
         state->invert = state->image->initial_invert;
         state->linear = false;
@@ -413,10 +424,9 @@ namespace
         {
             return false;
         }
-        const auto setting = voilut::window_for_roi(state->image->pixels,
-                                                    state->image->meta.width,
-                                                    state->image->meta.height,
-                                                    state->roi_image);
+        const auto setting = voilut::window_for_roi(
+            state->image->frame_pixels(state->frame_index), state->image->meta.width,
+            state->image->meta.height, state->roi_image);
         if (!setting)
         {
             return false; // 选区太小，保持当前窗
@@ -444,6 +454,22 @@ namespace
         });
     }
 
+    /// @brief 更新窗口标题（多帧时带帧号）。
+    void update_window_title(AppState *state)
+    {
+        if (state->window == nullptr || state->image == nullptr)
+        {
+            return;
+        }
+        std::string title = std::format("Windower — {}", state->image->name);
+        const uint32_t count = state->image->meta.frame_count;
+        if (count > 1)
+        {
+            title += std::format("（帧 {}/{}）", state->frame_index + 1, count);
+        }
+        glfwSetWindowTitle(state->window, title.c_str());
+    }
+
     /// @brief 把解码结果应用到状态与渲染器。
     void apply_image(AppState *state, voilut::DecodedImage image, const std::string &path)
     {
@@ -456,8 +482,8 @@ namespace
         // 先上传纹理：失败时保留当前图像，并向用户报告原因（例如超过纹理上限）。
         if (state->renderer != nullptr)
         {
-            if (auto uploaded =
-                    state->renderer->upload(image.meta.width, image.meta.height, image.pixels);
+            if (auto uploaded = state->renderer->upload(image.meta.width, image.meta.height,
+                                                        image.frame_pixels(0));
                 !uploaded)
             {
                 report_error(state, uploaded.error());
@@ -467,6 +493,7 @@ namespace
 
         *state->image = std::move(image);
         state->current_path = path;
+        state->frame_index = 0;
 
         const voilut::ImageMeta &meta = state->image->meta;
         state->level_min = meta.min_value - meta.value_range * 0.05;
@@ -484,9 +511,10 @@ namespace
         state->renderer->set_interpolation(state->linear);
         state->renderer->set_orientation(state->orientation);
 
-        // 直方图：只在新图加载时计算一次（[min, max] 上的 256 桶）。
-        state->histogram = voilut::compute_histogram(state->image->pixels, meta.min_value,
-                                                     std::max(meta.max_value, meta.min_value + 1.0));
+        // 直方图：只在新图加载时计算一次（首帧，[min, max] 上的 256 桶）。
+        state->histogram = voilut::compute_histogram(
+            state->image->frame_pixels(0), meta.min_value,
+            std::max(meta.max_value, meta.min_value + 1.0));
 
         // 窗值：优先恢复该图的上次窗值，否则 DICOM 默认窗 → p1/p99 自动窗。
         const auto it = state->remembered.find(path);
@@ -503,16 +531,64 @@ namespace
 
         if (state->window != nullptr)
         {
-            const std::string title = std::format("Windower — {}", state->image->name);
-            glfwSetWindowTitle(state->window, title.c_str());
+            update_window_title(state);
         }
         std::println("已加载 {}（{}x{}，{} bit，值域 {} ~ {}）", state->image->name, meta.width,
                      meta.height, meta.bits_per_sample, static_cast<long long>(meta.min_value),
                      static_cast<long long>(meta.max_value));
         if (meta.frame_count > 1)
         {
-            std::println("多帧/多页文件：共 {} 帧，当前只显示第 1 帧", meta.frame_count);
+            std::println("多帧/多页文件：共 {} 帧，可用 , / . 或面板滑块切换", meta.frame_count);
         }
+    }
+
+    /// @brief 切换多页 / 多帧文件的当前帧（保持窗值，重算该帧统计与直方图）。
+    void set_frame(AppState *state, uint32_t frame)
+    {
+        if (state->image == nullptr)
+        {
+            return;
+        }
+        const uint32_t count = state->image->meta.frame_count;
+        if (count <= 1)
+        {
+            return;
+        }
+        frame %= count;
+        if (frame == state->frame_index)
+        {
+            return;
+        }
+
+        const uint32_t width = state->image->meta.width;
+        const uint32_t height = state->image->meta.height;
+        const auto pixels = state->image->frame_pixels(frame);
+        if (auto uploaded = state->renderer->upload(width, height, pixels); !uploaded)
+        {
+            report_error(state, uploaded.error());
+            return;
+        }
+        state->frame_index = frame;
+
+        // 帧统计用于直方图与滑块范围；窗值保持不变（z-stack / 时间序列对比时需要一致）。
+        const voilut::ImageStats stats = voilut::compute_stats(pixels);
+        voilut::ImageMeta &meta = state->image->meta;
+        meta.min_value = stats.min_value;
+        meta.max_value = stats.max_value;
+        meta.p1 = stats.p1;
+        meta.p99 = stats.p99;
+        meta.value_range = stats.value_range;
+        state->level_min = stats.min_value - stats.value_range * 0.05;
+        state->level_max = stats.max_value + stats.value_range * 0.05;
+        state->width_max = std::max(stats.value_range, 2.0);
+        state->histogram = voilut::compute_histogram(
+            pixels, stats.min_value, std::max(stats.max_value, stats.min_value + 1.0));
+
+        apply_window(state);
+        update_window_title(state);
+        std::println("当前帧 {}/{}（值域 {} ~ {}）", frame + 1, count,
+                     static_cast<long long>(stats.min_value),
+                     static_cast<long long>(stats.max_value));
     }
 
     /// @brief 解码并显示图像列表中的第 `index` 项。
@@ -1086,6 +1162,19 @@ namespace
         case GLFW_KEY_6:
             apply_preset(state, static_cast<std::size_t>(key - GLFW_KEY_1));
             break;
+        case GLFW_KEY_COMMA:
+            if (state->image != nullptr && state->image->meta.frame_count > 1)
+            {
+                const uint32_t count = state->image->meta.frame_count;
+                set_frame(state, (state->frame_index + count - 1) % count);
+            }
+            break;
+        case GLFW_KEY_PERIOD:
+            if (state->image != nullptr && state->image->meta.frame_count > 1)
+            {
+                set_frame(state, state->frame_index + 1);
+            }
+            break;
         case GLFW_KEY_LEFT:
             nudge_window(state, -level_step, 1.0);
             break;
@@ -1150,8 +1239,9 @@ namespace
         double mouse_y = 0.0;
         glfwGetCursorPos(state->window, &mouse_x, &mouse_y);
         const auto [image_x, image_y] = screen_to_original(state, mouse_x, mouse_y);
-        const auto value = voilut::pixel_at(state->image->pixels, state->image->meta.width,
-                                            state->image->meta.height, image_x, image_y);
+        const auto value = voilut::pixel_at(
+            state->image->frame_pixels(state->frame_index), state->image->meta.width,
+            state->image->meta.height, image_x, image_y);
         if (value)
         {
             state->hover_valid = true;
@@ -1350,6 +1440,18 @@ namespace
         ImGui::Text("%s", state->image->name.c_str());
         ImGui::TextDisabled("%u x %u  ·  %u bit  ·  值域 %.0f ~ %.0f", meta.width, meta.height,
                             meta.bits_per_sample, meta.min_value, meta.max_value);
+
+        if (meta.frame_count > 1)
+        {
+            int frame = static_cast<int>(state->frame_index);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderInt("##frame", &frame, 0,
+                                 static_cast<int>(meta.frame_count) - 1, "帧 %d"))
+            {
+                set_frame(state, static_cast<uint32_t>(frame));
+            }
+            item_tooltip("多页 / 多帧文件：拖动切换当前帧（也可按 , / .）");
+        }
 
         ImGui::SeparatorText("窗宽窗位");
 
