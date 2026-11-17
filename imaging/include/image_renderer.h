@@ -25,7 +25,7 @@ namespace voilut
 
 namespace voilut
 {
-    /// @brief 窗宽窗位参数，与 `shaders/image.wgsl` 的 `WindowParams` 逐字段一致（32 字节）。
+    /// @brief 窗宽窗位与细节纹理参数，与 `shaders/image.wgsl` 的 `WindowParams` 逐字段一致（64 字节）。
     struct WindowParams
     {
         float level = 0.0f;      ///< 窗位（Window Level）。
@@ -35,8 +35,18 @@ namespace voilut
         float transform = 0.0f;  ///< 显示方向编码（见 `encode_orientation`）。
         float mode = 0.0f;       ///< 映射公式：0 = 简化，1 = DICOM 精确（见 `VoiMode`）。
         float value_type = 0.0f; ///< 像素类型：0 = uint16，1 = float32（纹理存位模式）。
-        float pad2 = 0.0f;       ///< 对齐填充。
+        float pad0 = 0.0f;       ///< 对齐填充。
+        float detail_x = 0.0f;   ///< 细节区域（原图坐标）x。
+        float detail_y = 0.0f;   ///< 细节区域 y。
+        float detail_width = 0.0f;  ///< 细节区域宽。
+        float detail_height = 0.0f; ///< 细节区域高。
+        float source_width = 0.0f;  ///< 原图逻辑宽。
+        float source_height = 0.0f; ///< 原图逻辑高。
+        float detail_enabled = 0.0f; ///< 是否启用细节纹理（>0.5）。
+        float pad1 = 0.0f;           ///< 对齐填充。
     };
+
+    static_assert(sizeof(WindowParams) == 64);
 
     /// @brief 使用 Dawn 渲染 16 位灰度图像。
     class ImageRenderer
@@ -100,6 +110,27 @@ namespace voilut
         /// @brief 设置视口变换（缩放 / 平移）。
         void set_transform(const Viewport &vp);
 
+        /// @brief 上传当前视口的 1:1 细节区域（16 位）。
+        /// @param x 原图坐标 x。
+        /// @param y 原图坐标 y。
+        /// @param width 区域宽（= 纹理宽）。
+        /// @param height 区域高。
+        /// @param pixels 区域像素（行优先）。
+        /// @return 成功为空；尺寸非法/内存不足时返回错误说明。
+        [[nodiscard("upload_detail 必须检查返回值")]]
+        std::expected<void, std::string> upload_detail(uint32_t x, uint32_t y, uint32_t width,
+                                                        uint32_t height,
+                                                        std::span<const uint16_t> pixels);
+
+        /// @brief 上传当前视口的 1:1 细节区域（32 位浮点）。
+        [[nodiscard("upload_detail_float 必须检查返回值")]]
+        std::expected<void, std::string> upload_detail_float(uint32_t x, uint32_t y,
+                                                              uint32_t width, uint32_t height,
+                                                              std::span<const float> pixels);
+
+        /// @brief 关闭细节纹理（只显示预览）。
+        void clear_detail();
+
         /// @brief 把图像绘制命令编码到给定渲染通道，供上层与 UI 合并提交。
         /// @param pass 已开始的渲染通道。
         void record(wgpu::RenderPassEncoder &pass);
@@ -107,6 +138,7 @@ namespace voilut
     private:
         void create_pipelines(std::string_view image_wgsl);
         void update_quad();
+        void reset_detail_binding();
 
         Context &context_; ///< WebGPU 环境引用。
 
@@ -115,8 +147,12 @@ namespace voilut
         wgpu::Buffer index_buffer_;           ///< 四边形（quad）索引缓冲。
         wgpu::Buffer params_buffer_;          ///< 窗宽窗位 uniform 缓冲。
         wgpu::BindGroup params_bind_group_;   ///< group 0 绑定。
-        wgpu::Texture image_texture_;         ///< 16 位图像纹理。
+        wgpu::Texture image_texture_;         ///< 预览/全图纹理。
         wgpu::BindGroup image_bind_group_;    ///< group 1 绑定。
+        wgpu::Texture dummy_detail_texture_;  ///< 未启用细节时的 1×1 占位纹理。
+        wgpu::BindGroup dummy_detail_bind_group_; ///< 占位细节绑定。
+        wgpu::Texture detail_texture_;        ///< 当前视口细节纹理。
+        wgpu::BindGroup detail_bind_group_;   ///< group 2 绑定。
 
         uint32_t image_width_ = 0;  ///< 图像宽（逻辑尺寸，可能大于纹理）。
         uint32_t image_height_ = 0; ///< 图像高（逻辑尺寸）。

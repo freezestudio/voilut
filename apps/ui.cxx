@@ -231,6 +231,8 @@ namespace voilut::app
             item_tooltip("显示或隐藏主调窗面板");
             menu_item_toggle("操作记录面板", &state->show_history_panel);
             item_tooltip("显示或隐藏 ROI 操作记录面板");
+            menu_item_toggle("高分辨率细节", &state->detail_enabled);
+            item_tooltip("虚拟切片图像放大时按需加载当前视口的 1:1 细节");
 
             ImGui::Separator();
             if (menu_item("显示全部面板"))
@@ -463,8 +465,13 @@ namespace voilut::app
         }
         if (state->renderer->preview_scale() > 1)
         {
-            ImGui::TextDisabled("预览：纹理降采样 1/%u（放大不会恢复原始像素）",
-                                state->renderer->preview_scale());
+            ImGui::TextDisabled("预览：纹理降采样 1/%u", state->renderer->preview_scale());
+        }
+        if (state->image->preview_width != 0 && state->detail_loaded.width > 0.0)
+        {
+            ImGui::TextDisabled("细节：%.0f×%.0f @ (%.0f, %.0f)", state->detail_loaded.width,
+                                state->detail_loaded.height, state->detail_loaded.x,
+                                state->detail_loaded.y);
         }
 
         if (meta.frame_count > 1)

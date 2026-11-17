@@ -228,6 +228,35 @@ namespace voilut
 
         // 缓冲创建完成后再创建管线（create_pipelines 会引用 params_buffer_）
         create_pipelines(wgsl.value());
+
+        // 未启用细节时的 1×1 占位纹理：group 2 必须始终有绑定。
+        {
+            wgpu::TextureDescriptor desc{
+                .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
+                .dimension = wgpu::TextureDimension::e2D,
+                .size = {.width = 1, .height = 1, .depthOrArrayLayers = 1},
+                .format = kImageFormat,
+                .mipLevelCount = 1,
+                .sampleCount = 1,
+            };
+            dummy_detail_texture_ = context_.device.CreateTexture(&desc);
+            const uint16_t zero = 0;
+            const wgpu::TexelCopyBufferLayout layout{
+                .offset = 0, .bytesPerRow = 2, .rowsPerImage = 1};
+            const wgpu::Extent3D size{.width = 1, .height = 1, .depthOrArrayLayers = 1};
+            const wgpu::TexelCopyTextureInfo destination{.texture = dummy_detail_texture_};
+            context_.device.GetQueue().WriteTexture(&destination, &zero, sizeof(zero), &layout,
+                                                    &size);
+            const wgpu::BindGroupEntry entry{.binding = 0,
+                                             .textureView = dummy_detail_texture_.CreateView()};
+            const wgpu::BindGroupDescriptor bg_desc{
+                .layout = image_pipeline_.GetBindGroupLayout(2),
+                .entryCount = 1,
+                .entries = &entry,
+            };
+            dummy_detail_bind_group_ = context_.device.CreateBindGroup(&bg_desc);
+            detail_bind_group_ = dummy_detail_bind_group_;
+        }
         return {};
     }
 
@@ -251,6 +280,9 @@ namespace voilut
         image_height_ = image_height;
         preview_scale_ = 1;
         image_bind_group_ = nullptr;
+        params_.source_width = static_cast<float>(image_width);
+        params_.source_height = static_cast<float>(image_height);
+        reset_detail_binding();
 
         // 设备上限由 Context 请求（Dawn 默认只给 8192，科研图像很容易超）。
         // data_size 有值时表示调用方已给出预览纹理尺寸（虚拟切片路径）；
@@ -407,6 +439,9 @@ namespace voilut
         image_height_ = image_height;
         preview_scale_ = 1;
         image_bind_group_ = nullptr;
+        params_.source_width = static_cast<float>(image_width);
+        params_.source_height = static_cast<float>(image_height);
+        reset_detail_binding();
 
         std::span<const float> upload_pixels = pixels;
         std::vector<float> reduced;
@@ -547,6 +582,114 @@ namespace voilut
         return {};
     }
 
+    std::expected<void, std::string> ImageRenderer::upload_detail(
+        uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+        std::span<const uint16_t> pixels)
+    {
+        if (width == 0 || height == 0 ||
+            width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+        {
+            return std::unexpected(std::format("细节区域尺寸 {}×{} 非法（上限 {}）", width, height,
+                                               context_.max_texture_dimension));
+        }
+        if (pixels.size() < static_cast<size_t>(width) * height)
+        {
+            return std::unexpected(std::string("细节像素数据长度不足"));
+        }
+        wgpu::TextureDescriptor desc{
+            .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
+            .dimension = wgpu::TextureDimension::e2D,
+            .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
+            .format = kImageFormat,
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        };
+        detail_texture_ = context_.device.CreateTexture(&desc);
+        const wgpu::TexelCopyTextureInfo destination{.texture = detail_texture_};
+        const wgpu::TexelCopyBufferLayout layout{
+            .offset = 0,
+            .bytesPerRow = width * 2,
+            .rowsPerImage = height,
+        };
+        const wgpu::Extent3D size{.width = width, .height = height, .depthOrArrayLayers = 1};
+        context_.device.GetQueue().WriteTexture(&destination, pixels.data(),
+                                                pixels.size() * sizeof(uint16_t), &layout, &size);
+
+        const wgpu::BindGroupEntry entry{.binding = 0,
+                                         .textureView = detail_texture_.CreateView()};
+        const wgpu::BindGroupDescriptor bg_desc{
+            .layout = image_pipeline_.GetBindGroupLayout(2),
+            .entryCount = 1,
+            .entries = &entry,
+        };
+        detail_bind_group_ = context_.device.CreateBindGroup(&bg_desc);
+        params_.detail_x = static_cast<float>(x);
+        params_.detail_y = static_cast<float>(y);
+        params_.detail_width = static_cast<float>(width);
+        params_.detail_height = static_cast<float>(height);
+        params_.detail_enabled = 1.0f;
+        return {};
+    }
+
+    std::expected<void, std::string> ImageRenderer::upload_detail_float(
+        uint32_t x, uint32_t y, uint32_t width, uint32_t height, std::span<const float> pixels)
+    {
+        if (width == 0 || height == 0 ||
+            width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+        {
+            return std::unexpected(std::format("浮点细节区域尺寸 {}×{} 非法（上限 {}）", width,
+                                               height, context_.max_texture_dimension));
+        }
+        if (pixels.size() < static_cast<size_t>(width) * height)
+        {
+            return std::unexpected(std::string("浮点细节像素数据长度不足"));
+        }
+        wgpu::TextureDescriptor desc{
+            .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
+            .dimension = wgpu::TextureDimension::e2D,
+            .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
+            .format = kFloatImageFormat,
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        };
+        detail_texture_ = context_.device.CreateTexture(&desc);
+        const wgpu::TexelCopyTextureInfo destination{.texture = detail_texture_};
+        const wgpu::TexelCopyBufferLayout layout{
+            .offset = 0,
+            .bytesPerRow = width * static_cast<uint32_t>(sizeof(float)),
+            .rowsPerImage = height,
+        };
+        const wgpu::Extent3D size{.width = width, .height = height, .depthOrArrayLayers = 1};
+        context_.device.GetQueue().WriteTexture(&destination, pixels.data(),
+                                                pixels.size() * sizeof(float), &layout, &size);
+
+        const wgpu::BindGroupEntry entry{.binding = 0,
+                                         .textureView = detail_texture_.CreateView()};
+        const wgpu::BindGroupDescriptor bg_desc{
+            .layout = image_pipeline_.GetBindGroupLayout(2),
+            .entryCount = 1,
+            .entries = &entry,
+        };
+        detail_bind_group_ = context_.device.CreateBindGroup(&bg_desc);
+        params_.detail_x = static_cast<float>(x);
+        params_.detail_y = static_cast<float>(y);
+        params_.detail_width = static_cast<float>(width);
+        params_.detail_height = static_cast<float>(height);
+        params_.detail_enabled = 1.0f;
+        return {};
+    }
+
+    void ImageRenderer::clear_detail()
+    {
+        reset_detail_binding();
+    }
+
+    void ImageRenderer::reset_detail_binding()
+    {
+        detail_bind_group_ = dummy_detail_bind_group_;
+        params_.detail_enabled = 0.0f;
+    }
+
     void ImageRenderer::set_window(double level, double width)
     {
         params_.level = static_cast<float>(level);
@@ -593,6 +736,7 @@ namespace voilut
         pass.SetIndexBuffer(index_buffer_, wgpu::IndexFormat::Uint16);
         pass.SetBindGroup(0, params_bind_group_);
         pass.SetBindGroup(1, image_bind_group_);
+        pass.SetBindGroup(2, detail_bind_group_);
         pass.DrawIndexed(static_cast<uint32_t>(kQuadIndices.size()));
     }
 
@@ -623,7 +767,8 @@ namespace voilut
         wgpu::BindGroupLayout textureLayout =
             context_.device.CreateBindGroupLayout(&textureLayoutDesc);
 
-        const std::array<wgpu::BindGroupLayout, 2> layouts = {uniformLayout, textureLayout};
+        const std::array<wgpu::BindGroupLayout, 3> layouts = {uniformLayout, textureLayout,
+                                                               textureLayout};
         wgpu::PipelineLayoutDescriptor layoutDesc{
             .bindGroupLayoutCount = layouts.size(),
             .bindGroupLayouts = layouts.data(),

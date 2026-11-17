@@ -4,6 +4,8 @@
 #include "app_ops.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <format>
 #include <print>
@@ -346,7 +348,8 @@ namespace voilut::app
     }
 
     /// @brief 把解码结果应用到状态与渲染器。
-    void apply_image(AppState *state, voilut::DecodedImage image, const std::string &path)
+    void apply_image(AppState *state, voilut::DecodedImage image, const std::string &path,
+                     std::shared_ptr<voilut::RegionSource> source)
     {
         // 先保存上一张的窗值。
         if (state->remember_window && state->image != nullptr && !state->current_path.empty())
@@ -367,6 +370,12 @@ namespace voilut::app
         *state->image = std::move(image);
         state->current_path = path;
         state->frame_index = 0;
+        state->region_source = std::move(source);
+        ++state->detail_generation;
+        state->detail_loaded = {};
+        state->detail_loaded_frame = 0;
+        state->detail_request = {};
+        state->renderer->clear_detail();
 
         const voilut::ImageMeta &meta = state->image->meta;
         // DICOM 精确 VOI 只对整数像素有意义（W-1 分母/阈值）；浮点图像回到简化公式。
@@ -407,6 +416,11 @@ namespace voilut::app
             reset_window(state);
         }
         fit_to_window(state);
+        state->detail_last_viewport = state->viewport;
+        state->detail_last_orientation = state->orientation;
+        state->detail_last_frame = state->frame_index;
+        state->detail_dirty = true;
+        state->detail_changed_at = std::chrono::steady_clock::now();
 
         if (state->window != nullptr)
         {
@@ -437,8 +451,16 @@ namespace voilut::app
         }
         if (state->renderer->preview_scale() > 1)
         {
-            std::println("大图预览：按 1/{} 降采样显示（放大不会恢复原始像素）",
-                         state->renderer->preview_scale());
+            if (state->region_source)
+            {
+                std::println("大图预览：按 1/{} 显示，放大后按需加载 1:1 细节",
+                             state->renderer->preview_scale());
+            }
+            else
+            {
+                std::println("大图预览：按 1/{} 降采样显示（放大不会恢复原始像素）",
+                             state->renderer->preview_scale());
+            }
         }
     }
 
@@ -550,5 +572,195 @@ namespace voilut::app
         {
             state->hover_valid = false;
         }
+    }
+
+    /// @brief 视口停止变化后按需加载 1:1 细节纹理（虚拟切片 Phase 1b）。
+    void update_detail(AppState *state)
+    {
+        if (state->image == nullptr || state->renderer == nullptr)
+        {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+
+        if (state->detail_inflight && state->detail_future.valid() &&
+            state->detail_future.wait_for(std::chrono::seconds(0)) ==
+                std::future_status::ready)
+        {
+            auto result = state->detail_future.get();
+            state->detail_inflight = false;
+            const bool current = state->detail_request_generation == state->detail_generation;
+            if (result && current && state->region_source != nullptr)
+            {
+                const voilut::PixelRegion &region = *result;
+                const bool is_float =
+                    state->image->pixel_type == voilut::DecodedImage::PixelType::Float32;
+                const auto uploaded =
+                    is_float ? state->renderer->upload_detail_float(
+                                   region.x, region.y, region.width, region.height, region.f32)
+                             : state->renderer->upload_detail(
+                                   region.x, region.y, region.width, region.height, region.u16);
+                if (!uploaded)
+                {
+                    std::println("细节上传失败：{}", uploaded.error());
+                    state->renderer->clear_detail();
+                    state->detail_loaded = {};
+                }
+                else
+                {
+                    if (state->detail_loaded.width == 0.0)
+                    {
+                        std::println("细节纹理已启用：{}×{}", region.width, region.height);
+                    }
+                    state->detail_loaded = {
+                        .x = static_cast<double>(region.x),
+                        .y = static_cast<double>(region.y),
+                        .width = static_cast<double>(region.width),
+                        .height = static_cast<double>(region.height),
+                    };
+                    state->detail_loaded_frame = state->frame_index;
+                }
+            }
+            else if (!result)
+            {
+                std::println("细节读取失败：{}", result.error());
+                state->renderer->clear_detail();
+                state->detail_loaded = {};
+            }
+            glfwPostEmptyEvent();
+        }
+
+        if (state->region_source == nullptr || !state->detail_enabled || state->loading)
+        {
+            state->renderer->clear_detail();
+            state->detail_loaded = {};
+            state->detail_dirty = false;
+            return;
+        }
+
+        const auto &meta = state->image->meta;
+        const auto &vp = state->viewport;
+        const auto &last_vp = state->detail_last_viewport;
+        const auto &orientation = state->orientation;
+        const auto &last_orientation = state->detail_last_orientation;
+        const bool changed = vp.scale != last_vp.scale || vp.x != last_vp.x ||
+                             vp.y != last_vp.y ||
+                             orientation.rotation != last_orientation.rotation ||
+                             orientation.flip_h != last_orientation.flip_h ||
+                             orientation.flip_v != last_orientation.flip_v ||
+                             state->frame_index != state->detail_last_frame;
+        if (changed)
+        {
+            state->detail_last_viewport = vp;
+            state->detail_last_orientation = orientation;
+            state->detail_last_frame = state->frame_index;
+            state->detail_dirty = true;
+            state->detail_changed_at = now;
+        }
+        if (!state->detail_dirty)
+        {
+            return;
+        }
+        if (now - state->detail_changed_at < std::chrono::milliseconds(120))
+        {
+            return;
+        }
+        if (state->detail_inflight)
+        {
+            return;
+        }
+        if (vp.scale < 0.75)
+        {
+            state->renderer->clear_detail();
+            state->detail_loaded = {};
+            state->detail_dirty = false;
+            return;
+        }
+
+        const std::array<std::pair<double, double>, 4> corners = {
+            screen_to_original(state, 0.0, 0.0),
+            screen_to_original(state, state->viewport_width, 0.0),
+            screen_to_original(state, 0.0, state->viewport_height),
+            screen_to_original(state, state->viewport_width, state->viewport_height),
+        };
+        double min_x = corners[0].first;
+        double max_x = corners[0].first;
+        double min_y = corners[0].second;
+        double max_y = corners[0].second;
+        for (const auto &corner : corners)
+        {
+            min_x = std::min(min_x, corner.first);
+            max_x = std::max(max_x, corner.first);
+            min_y = std::min(min_y, corner.second);
+            max_y = std::max(max_y, corner.second);
+        }
+        min_x = std::clamp(min_x, 0.0, static_cast<double>(meta.width));
+        max_x = std::clamp(max_x, 0.0, static_cast<double>(meta.width));
+        min_y = std::clamp(min_y, 0.0, static_cast<double>(meta.height));
+        max_y = std::clamp(max_y, 0.0, static_cast<double>(meta.height));
+        if (max_x - min_x < 1.0 || max_y - min_y < 1.0)
+        {
+            state->detail_dirty = false;
+            return;
+        }
+
+        constexpr uint32_t kDetailMax = 4096;
+        const uint32_t max_width = std::min(kDetailMax, meta.width);
+        const uint32_t max_height = std::min(kDetailMax, meta.height);
+        const uint32_t min_detail_width = std::min<uint32_t>(256, max_width);
+        const uint32_t min_detail_height = std::min<uint32_t>(256, max_height);
+        const uint32_t wanted_width = std::clamp<uint32_t>(
+            static_cast<uint32_t>(std::ceil(max_x - min_x)), min_detail_width, max_width);
+        const uint32_t wanted_height = std::clamp<uint32_t>(
+            static_cast<uint32_t>(std::ceil(max_y - min_y)), min_detail_height, max_height);
+        if (wanted_width == 0 || wanted_height == 0)
+        {
+            state->detail_dirty = false;
+            return;
+        }
+        const double center_x = (min_x + max_x) * 0.5;
+        const double center_y = (min_y + max_y) * 0.5;
+        auto align = [](double value) {
+            return static_cast<uint32_t>(std::max(0.0, std::floor(value / 64.0) * 64.0));
+        };
+        uint32_t rx = align(center_x - wanted_width * 0.5);
+        uint32_t ry = align(center_y - wanted_height * 0.5);
+        rx = std::min(rx, meta.width - wanted_width);
+        ry = std::min(ry, meta.height - wanted_height);
+
+        const voilut::Rect request{
+            .x = static_cast<double>(rx),
+            .y = static_cast<double>(ry),
+            .width = static_cast<double>(wanted_width),
+            .height = static_cast<double>(wanted_height),
+        };
+        if (request.x == state->detail_loaded.x && request.y == state->detail_loaded.y &&
+            request.width == state->detail_loaded.width &&
+            request.height == state->detail_loaded.height &&
+            state->detail_loaded_frame == state->frame_index)
+        {
+            state->detail_dirty = false;
+            return;
+        }
+
+        state->detail_dirty = false;
+        ++state->detail_generation;
+        state->detail_request_generation = state->detail_generation;
+        state->detail_request = request;
+        state->detail_inflight = true;
+        auto source = state->region_source;
+        GLFWwindow *window = state->window;
+        const uint32_t frame = state->frame_index;
+        state->detail_future = std::async(std::launch::async, [source, request, frame, window]() {
+            auto result = source->read_region(static_cast<uint32_t>(request.x),
+                                              static_cast<uint32_t>(request.y),
+                                              static_cast<uint32_t>(request.width),
+                                              static_cast<uint32_t>(request.height), frame);
+            if (window != nullptr)
+            {
+                glfwPostEmptyEvent();
+            }
+            return result;
+        });
     }
 } // namespace voilut::app

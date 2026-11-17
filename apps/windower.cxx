@@ -246,6 +246,12 @@ int main(int argc, char **argv)
                     --warmup_frames;
                     glfwPollEvents();
                 }
+                else if (state.detail_dirty)
+                {
+                    // 细节请求有 120 ms 防抖：需要一个超时唤醒，否则按需渲染会
+                    // 一直阻塞在 WaitEvents，防抖到期后没有事件就不再触发。
+                    glfwWaitEventsTimeout(0.15);
+                }
                 else
                 {
                     glfwWaitEvents();
@@ -254,6 +260,7 @@ int main(int argc, char **argv)
                 ImGui_ImplWGPU_NewFrame();
                 ImGui_ImplGlfw_NewFrame();
                 poll_load(&state);
+                update_detail(&state);
                 ImGui::NewFrame();
                 draw_menu_bar(&state);
                 update_hover(&state);

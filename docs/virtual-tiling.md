@@ -345,9 +345,10 @@ Phase 2 在此基础上加：
 - [x] 打开流程：超大 TIFF 走 `open_region_source` + **流式预览**（4096 边长），
       小图仍走全量解码；
 - [x] 探针 / ROI 按原图坐标映射到预览纹理；
-- [ ] `ImageRenderer` 第二纹理（detail）+ 扩展 uniform + WGSL 细节采样；
-- [ ] `DetailController`（防抖、generation、异步）；
-- [ ] 验收：40000² tiled TIFF 打开 RSS 有界、100% 可读、平移 300ms 内更新。
+- [x] `ImageRenderer` 第二纹理（detail）+ 64 字节 uniform + WGSL 细节采样；
+- [x] `DetailController`（120 ms 防抖、generation、异步、按需唤醒）；
+- [x] 已在 20000×2000 tiled TIFF 上验证：预览 1/5，放大后请求 256×256 细节并上传；
+- [ ] 验收：40000² tiled TIFF 打开 RSS 有界、100% 可读、平移 300ms 内更新（待大样本）。
 
 ### Phase 2：缓存与 DICOM
 

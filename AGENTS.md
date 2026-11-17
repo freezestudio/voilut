@@ -33,7 +33,7 @@
   - `image_model.*`：纯计算（统计、直方图、自动窗、ROI 窗、预设窗、拖动调窗），
     必须可在无 GPU 环境下单独测试。
   - `image_renderer.*`：Dawn 管线；`WindowParams` 必须与 `shaders/image.wgsl`
-    的 `WindowParams` 逐字段一致（32 字节，补齐 padding）。
+    的 `WindowParams` 逐字段一致（64 字节，补齐 padding；含细节区域字段）。
   - `decode/`：格式分派 + TIFF（libtiff）+ DICOM（GDCM）。
 - `apps/`：可执行入口。UI 只调库，不重复实现映射逻辑。已按职责拆分：
   `app_state.h`（共享状态）、`app_ops.cxx`（窗值/视口/ROI/帧）、
@@ -98,7 +98,8 @@
 
 ## 窗宽窗位映射与显示
 
-- `WindowParams`（32 字节）与 `shaders/image.wgsl` 逐字段一致；`mode` 字段区分
+- `WindowParams`（64 字节）与 `shaders/image.wgsl` 逐字段一致；前 8 个 float 之后是
+  细节区域、原图尺寸与 `detail_enabled`；`mode` 字段区分
   简化公式（默认）与 DICOM 精确公式（C.11.2.1.2.1）。改公式必须同时改
   `display_ratio` 与 WGSL，并在 `tests/window_model_test.cxx` 覆盖两种模式。
 - 大图：`Context` 向 adapter 请求 `min(adapter.maxTextureDimension2D, 16384)`；
@@ -125,12 +126,16 @@
 - 模态值：内部像素仍是存储域（有符号 +32768，uint16 纹理）；UI 的窗位/窗宽、探针、
   ROI 记录必须经 `ValueScale::to_modality` / `to_storage` / `width_to_*` 换算。
   `display_ratio` 与着色器继续使用存储域，不要混用。CT 的 RescaleType 会显示为 HU。
+- 细节纹理：`ImageRenderer::upload_detail` 写 group 2（未启用时绑定 1×1 占位纹理），
+  shader 用 `source_size` + `detail_rect` 判断并采样；`update_detail` 在视口停止变化
+  120 ms 后启动后台 `RegionSource::read_region`。按需渲染下 detail_dirty 时主循环必须
+  用 `glfwWaitEventsTimeout`（否则阻塞在 WaitEvents，防抖到期后不再触发）。
 - 大图预览路径：`DecodedImage.meta.width/height` 是**原图逻辑尺寸**，
   `preview_width/height` 是纹理尺寸（0 表示两者相同）；像素索引用
   `texture_width()/texture_height()`，不要用 `meta.width` 索引 `pixels`。
   `ImageRenderer::upload(..., data_size)` 接受预览数据尺寸；`preview_scale()` 供 UI 提示。
   当前超大 TIFF 由 `image_io::load_for_viewer` 走 `RegionSource::preview`（流式），
-  细节纹理与 DetailController 仍待实现（Phase 1b）。
+  放大后由 `update_detail` 按需加载 1:1 细节（Phase 1b 已接通）。
 - 区域读取（虚拟切片 Phase 0）：`imaging/include/region_source.h` +
   `imaging/src/decode/tiff_region_source.cxx`。libtiff 的 `TIFFReadScanline/TIFFReadTile`
   **已经返回本机字节序**，不要再手动 `TIFFIsByteSwapped` 交换（会双重交换）；

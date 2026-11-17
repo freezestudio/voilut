@@ -24,11 +24,16 @@ struct WindowParams {
   transform: f32, // 显示方向编码：bit0-1 旋转，bit2 水平翻转，bit3 垂直翻转
   mode: f32,      // 映射公式：0 = 简化，1 = DICOM 精确（C.11.2.1.2.1）
   value_type: f32, // 像素类型：0 = uint16，1 = float32（R32Uint 存位模式）
-  _pad2: f32,
+  _pad0: f32,
+  detail_rect: vec4<f32>, // 细节区域（原图像素坐标）
+  source_size: vec2<f32>, // 原图逻辑尺寸
+  detail_enabled: f32,    // >0.5 时在细节区域内采样 detail 纹理
+  _pad1: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: WindowParams;
 @group(1) @binding(0) var image: texture_2d<u32>;
+@group(2) @binding(0) var detail: texture_2d<u32>;
 
 struct VSOut {
   @builtin(position) position: vec4<f32>,
@@ -85,8 +90,7 @@ fn load_value(coord: vec2<i32>, level: i32) -> f32 {
 }
 
 // 最近邻采样：按 UV 取最近像素，放大时保留锐利边缘。
-fn sampleNearest(uv: vec2<f32>) -> f32 {
-  let lod = select_lod(uv);
+fn sampleNearest(uv: vec2<f32>, lod: i32) -> f32 {
   let size = vec2<i32>(textureDimensions(image, lod));
   let coord = clamp(vec2<i32>(vec2<f32>(size) * uv), vec2<i32>(0), size - vec2<i32>(1));
   return load_value(coord, lod);
@@ -94,8 +98,7 @@ fn sampleNearest(uv: vec2<f32>) -> f32 {
 
 // 双线性采样：手动对 4 个邻居按小数权重混合。
 // （整数纹理不能直接用采样器做插值，因此手动实现；浮点也走同一路径。）
-fn sampleBilinear(uv: vec2<f32>) -> f32 {
-  let lod = select_lod(uv);
+fn sampleBilinear(uv: vec2<f32>, lod: i32) -> f32 {
   let size = vec2<i32>(textureDimensions(image, lod));
   let p = vec2<f32>(size) * uv - vec2<f32>(0.5);
   let base = vec2<i32>(floor(p));
@@ -109,15 +112,55 @@ fn sampleBilinear(uv: vec2<f32>) -> f32 {
   return mix(mix(v00, v10, frac.x), mix(v01, v11, frac.x), frac.y);
 }
 
+// 读取细节纹理的值（1:1，无 mipmap）。
+fn load_detail_value(coord: vec2<i32>) -> f32 {
+  let raw = textureLoad(detail, coord, 0).r;
+  if (params.value_type > 0.5) {
+    return bitcast<f32>(raw);
+  }
+  return f32(raw);
+}
+
+// 细节区域采样：最近邻 / 双线性。
+fn sample_detail(uv: vec2<f32>) -> f32 {
+  let size = vec2<i32>(textureDimensions(detail, 0));
+  if (params.linear > 0.5) {
+    let p = vec2<f32>(size) * uv - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(p));
+    let frac = p - floor(p);
+    let lo = clamp(base, vec2<i32>(0), size - vec2<i32>(1));
+    let hi = clamp(base + vec2<i32>(1), vec2<i32>(0), size - vec2<i32>(1));
+    let v00 = load_detail_value(vec2<i32>(lo.x, lo.y));
+    let v10 = load_detail_value(vec2<i32>(hi.x, lo.y));
+    let v01 = load_detail_value(vec2<i32>(lo.x, hi.y));
+    let v11 = load_detail_value(vec2<i32>(hi.x, hi.y));
+    return mix(mix(v00, v10, frac.x), mix(v01, v11, frac.x), frac.y);
+  }
+  let coord = clamp(vec2<i32>(vec2<f32>(size) * uv), vec2<i32>(0), size - vec2<i32>(1));
+  return load_detail_value(coord);
+}
+
 @fragment
 fn fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   // 显示方向变换：quad 提供的是显示 UV，这里映射到原图 UV 再采样。
   let image_uv = orient_uv(uv);
+  // dpdx/dpdy 必须在统一控制流中调用，因此先无条件计算预览 LOD。
+  let preview_lod = select_lod(image_uv);
+  let source_px = image_uv * params.source_size;
+  let detail_min = params.detail_rect.xy;
+  let detail_max = detail_min + params.detail_rect.zw;
+  let use_detail = params.detail_enabled > 0.5 &&
+      source_px.x >= detail_min.x && source_px.x < detail_max.x &&
+      source_px.y >= detail_min.y && source_px.y < detail_max.y;
+
   var value: f32;
-  if (params.linear > 0.5) {
-    value = sampleBilinear(image_uv);
+  if (use_detail) {
+    let detail_uv = (source_px - detail_min) / params.detail_rect.zw;
+    value = sample_detail(detail_uv);
+  } else if (params.linear > 0.5) {
+    value = sampleBilinear(image_uv, preview_lod);
   } else {
-    value = sampleNearest(image_uv);
+    value = sampleNearest(image_uv, preview_lod);
   }
   // 窗宽窗位映射：两种公式都必须与 C++ 侧 voilut::display_ratio 完全一致。
   var mapped: f32;

@@ -43,7 +43,7 @@ namespace voilut::app
         constexpr uint32_t kVirtualPreviewDimension = 4096;
 
         /// @brief 解码：小图全量；超大 TIFF 走区域源预览，避免分配整幅像素。
-        std::expected<voilut::DecodedImage, std::string> load_for_viewer(const std::string &path)
+        std::expected<LoadedImage, std::string> load_for_viewer(const std::string &path)
         {
             const auto kind = voilut::kind_from_name(path);
             if (!kind)
@@ -67,7 +67,11 @@ namespace voilut::app
                         auto preview = (*source)->preview(kVirtualPreviewDimension);
                         if (preview)
                         {
-                            return preview;
+                            return LoadedImage{
+                                .image = std::move(preview.value()),
+                                .source = std::shared_ptr<voilut::RegionSource>(
+                                    std::move(*source)),
+                            };
                         }
                         if (total_bytes > voilut::kMaxDecodeBytes)
                         {
@@ -77,7 +81,12 @@ namespace voilut::app
                     }
                 }
             }
-            return voilut::decode_image(path, *kind);
+            auto decoded = voilut::decode_image(path, *kind);
+            if (!decoded)
+            {
+                return std::unexpected(decoded.error());
+            }
+            return LoadedImage{.image = std::move(decoded.value()), .source = {}};
         }
     } // namespace
 
@@ -131,7 +140,8 @@ namespace voilut::app
         state->loading = false;
         if (result)
         {
-            apply_image(state, std::move(result.value()), state->load_path);
+            apply_image(state, std::move(result->image), state->load_path,
+                        std::move(result->source));
         }
         else
         {

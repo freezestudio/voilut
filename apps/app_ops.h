@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -28,7 +29,9 @@ namespace voilut::app
     bool apply_roi_window(AppState *state);
     void record_current_roi(AppState *state);
     void update_window_title(AppState *state);
-    void apply_image(AppState *state, voilut::DecodedImage image, const std::string &path);
+    void apply_image(AppState *state, voilut::DecodedImage image, const std::string &path,
+                     std::shared_ptr<voilut::RegionSource> source = {});
     void set_frame(AppState *state, uint32_t frame);
     void update_hover(AppState *state);
+    void update_detail(AppState *state);
 } // namespace voilut::app

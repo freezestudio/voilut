@@ -3,16 +3,19 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <future>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "image_model.h"
 #include "orientation.h"
+#include "region_source.h"
 #include "viewport.h"
 
 struct GLFWwindow;
@@ -35,6 +38,13 @@ namespace voilut::app
         voilut::WindowSetting window;
         voilut::ValueScale scale;
         std::string modality_unit;
+    };
+
+    /// @brief 后台解码结果：预览图像 + 可选区域源（虚拟切片）。
+    struct LoadedImage
+    {
+        voilut::DecodedImage image;
+        std::shared_ptr<voilut::RegionSource> source;
     };
 
     /// @brief 应用整体状态（回调通过 GLFW 的 user pointer 获取它）。
@@ -116,10 +126,26 @@ namespace voilut::app
 
         // 异步解码：避免大图加载时冻结 UI。
         bool loading = false; ///< 是否正在后台解码。
-        std::future<std::expected<voilut::DecodedImage, std::string>> load_future; ///< 后台结果。
+        std::future<std::expected<LoadedImage, std::string>> load_future; ///< 后台结果。
         std::string load_path;                 ///< 正在加载的路径。
         std::size_t pending_index = 0;         ///< 加载期间用户请求的下一张。
         bool has_pending = false;              ///< 是否有待处理的翻页请求。
+
+        // 细节纹理（虚拟切片 Phase 1b）。
+        std::shared_ptr<voilut::RegionSource> region_source; ///< 区域源（虚拟图像）。
+        bool detail_enabled = true;                         ///< 用户是否启用 1:1 细节。
+        std::future<std::expected<voilut::PixelRegion, std::string>> detail_future;
+        bool detail_inflight = false;
+        uint64_t detail_generation = 0;
+        uint64_t detail_request_generation = 0;
+        bool detail_dirty = false;
+        std::chrono::steady_clock::time_point detail_changed_at{};
+        voilut::Rect detail_request{};
+        voilut::Rect detail_loaded{};
+        uint32_t detail_loaded_frame = 0;
+        voilut::Viewport detail_last_viewport{};
+        voilut::Orientation detail_last_orientation{};
+        uint32_t detail_last_frame = 0;
     };
 
 } // namespace voilut::app
