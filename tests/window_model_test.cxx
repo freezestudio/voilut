@@ -126,6 +126,28 @@ int main()
     check(std::abs(display_ratio(probe_value, auto_w) - display_ratio(probe_value, narrow)) > 1e-3,
           "预设窗改变同一像素的显示灰度");
 
+    // ---------------- 5) VOI 映射公式（简化 / DICOM） ----------------
+    std::printf("5) VOI 映射公式\n");
+    const WindowSetting sample{100.0, 100.0};
+    // 简化公式：下界 50，上界 150，中心 100。
+    check(near(display_ratio(50.0, sample), 0.0), "简化：下界 → 0");
+    check(near(display_ratio(100.0, sample), 0.5), "简化：中心 → 0.5");
+    check(near(display_ratio(150.0, sample), 1.0), "简化：上界 → 1");
+    // DICOM 精确公式：下界 50、上界 149、中心 99.5，分母 W-1。
+    check(near(display_ratio(50.0, sample, false, VoiMode::Dicom), 0.0), "DICOM：下界 → 0");
+    check(near(display_ratio(99.5, sample, false, VoiMode::Dicom), 0.5), "DICOM：中心 → 0.5");
+    check(near(display_ratio(149.0, sample, false, VoiMode::Dicom), 1.0), "DICOM：上界 → 1");
+    check(std::abs(display_ratio(149.0, sample) -
+                   display_ratio(149.0, sample, false, VoiMode::Dicom)) > 1e-6,
+          "两模式在边界附近结果不同");
+    check(near(display_ratio(50.0, sample, true, VoiMode::Dicom), 1.0), "DICOM：反色生效");
+    // W == 1：DICOM 退化为阈值。
+    const WindowSetting unit_width{100.0, 1.0};
+    check(near(display_ratio(99.5, unit_width, false, VoiMode::Dicom), 0.0),
+          "DICOM：W=1 阈值以下 → 0");
+    check(near(display_ratio(100.0, unit_width, false, VoiMode::Dicom), 1.0),
+          "DICOM：W=1 阈值以上 → 1");
+
     std::printf("\n%s（失败 %d 项）\n", g_failures == 0 ? "全部通过" : "存在失败", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

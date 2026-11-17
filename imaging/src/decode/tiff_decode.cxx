@@ -3,11 +3,13 @@
 
 #include "decode/tiff_decode.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring> // std::memcpy
 #include <filesystem>
 #include <format>
 #include <memory>
+#include <new> // std::bad_alloc
 #include <string>
 #include <vector>
 
@@ -19,6 +21,16 @@ namespace voilut
     {
         /// @brief TIFF 句柄的 RAII 包装（退出时自动 TIFFClose）。
         using TiffHandle = std::unique_ptr<TIFF, decltype(&TIFFClose)>;
+
+        /// @brief 16 位像素字节交换（大端 TIFF 需要）。
+        void swap_bytes_16(uint16_t *values, size_t count) noexcept
+        {
+            for (size_t i = 0; i < count; ++i)
+            {
+                const uint16_t value = values[i];
+                values[i] = static_cast<uint16_t>((value >> 8) | (value << 8));
+            }
+        }
 
         /// @brief 取路径中的文件名部分。
         std::string file_name_of(const std::string &path)
@@ -61,9 +73,22 @@ namespace voilut
 
         uint16_t bits_per_sample = 0;
         uint16_t samples_per_pixel = 1;
+        uint16_t sample_format = SAMPLEFORMAT_UINT;
+        uint16_t photometric = PHOTOMETRIC_MINISBLACK;
         TIFFGetFieldDefaulted(tif.get(), TIFFTAG_BITSPERSAMPLE, &bits_per_sample);
         TIFFGetFieldDefaulted(tif.get(), TIFFTAG_SAMPLESPERPIXEL, &samples_per_pixel);
+        TIFFGetFieldDefaulted(tif.get(), TIFFTAG_SAMPLEFORMAT, &sample_format);
+        TIFFGetFieldDefaulted(tif.get(), TIFFTAG_PHOTOMETRIC, &photometric);
 
+        if (sample_format == SAMPLEFORMAT_IEEEFP)
+        {
+            return std::unexpected("暂不支持浮点 TIFF（IEEE float），请先转换为 16 位整数 TIFF");
+        }
+        if (sample_format == SAMPLEFORMAT_INT || sample_format == SAMPLEFORMAT_COMPLEXINT ||
+            sample_format == SAMPLEFORMAT_COMPLEXIEEEFP)
+        {
+            return std::unexpected("暂不支持有符号 / 复数像素的 TIFF");
+        }
         if ((bits_per_sample != 8 && bits_per_sample != 16) || samples_per_pixel != 1)
         {
             return std::unexpected(
@@ -71,34 +96,118 @@ namespace voilut
                             bits_per_sample, samples_per_pixel));
         }
 
-        // 逐行读取：分配一块扫描行缓冲，避免依赖具体的 strip/tile 组织。
-        const tsize_t scanline_size = TIFFScanlineSize(tif.get());
-        const tsize_t bytes_per_pixel = bits_per_sample / 8;
-        if (scanline_size < static_cast<tsize_t>(width) * bytes_per_pixel)
+        // 多页 TIFF：只解码第 0 页（z-stack / 时间序列的帧导航后续实现）。
+        uint32_t page_count = 1;
+        const tdir_t directories = TIFFNumberOfDirectories(tif.get());
+        if (directories > 1)
         {
-            return std::unexpected("TIFF 扫描行尺寸异常（小于图像宽度 × 每像素字节数）");
+            page_count = static_cast<uint32_t>(directories);
+            if (TIFFSetDirectory(tif.get(), 0) != 1)
+            {
+                return std::unexpected("无法回到 TIFF 第 0 页");
+            }
         }
 
-        std::vector<uint16_t> pixels(static_cast<size_t>(width) * height);
-        std::vector<uint8_t> row_buffer(static_cast<size_t>(scanline_size));
-        for (uint32_t row = 0; row < height; ++row)
+        const tsize_t bytes_per_pixel = bits_per_sample / 8;
+        const bool byte_swapped = TIFFIsByteSwapped(tif.get()) != 0;
+
+        std::vector<uint16_t> pixels;
+        try
         {
-            if (TIFFReadScanline(tif.get(), row_buffer.data(), row) < 0)
+            pixels.resize(static_cast<size_t>(width) * height);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return std::unexpected(
+                std::format("内存不足：无法为 {}×{} 图像分配像素缓冲区", width, height));
+        }
+
+        if (TIFFIsTiled(tif.get()))
+        {
+            // tiled TIFF（显微 / 工业 CT 常见）：逐 tile 读取。
+            uint32_t tile_width = 0;
+            uint32_t tile_height = 0;
+            if (TIFFGetField(tif.get(), TIFFTAG_TILEWIDTH, &tile_width) != 1 ||
+                TIFFGetField(tif.get(), TIFFTAG_TILELENGTH, &tile_height) != 1 || tile_width == 0 ||
+                tile_height == 0)
             {
-                return std::unexpected(std::format("读取 TIFF 第 {} 行失败", row));
+                return std::unexpected("TIFF 缺少有效的 tile 尺寸");
             }
-            const size_t base = static_cast<size_t>(row) * width;
-            if (bits_per_sample == 8)
+            const tmsize_t tile_size = TIFFTileSize(tif.get());
+            if (tile_size <= 0 ||
+                tile_size < static_cast<tmsize_t>(tile_width) * tile_height * bytes_per_pixel)
             {
-                for (uint32_t x = 0; x < width; ++x)
+                return std::unexpected("TIFF tile 缓冲区尺寸异常");
+            }
+            std::vector<uint8_t> tile(static_cast<size_t>(tile_size));
+            for (uint32_t y0 = 0; y0 < height; y0 += tile_height)
+            {
+                for (uint32_t x0 = 0; x0 < width; x0 += tile_width)
                 {
-                    pixels[base + x] = row_buffer[x];
+                    if (TIFFReadTile(tif.get(), tile.data(), x0, y0, 0, 0) < 0)
+                    {
+                        return std::unexpected(
+                            std::format("读取 TIFF tile ({}, {}) 失败", x0, y0));
+                    }
+                    const uint32_t copy_width = std::min(tile_width, width - x0);
+                    const uint32_t copy_height = std::min(tile_height, height - y0);
+                    for (uint32_t ty = 0; ty < copy_height; ++ty)
+                    {
+                        const uint8_t *src = tile.data() +
+                                             static_cast<size_t>(ty) * tile_width * bytes_per_pixel;
+                        uint16_t *dst = pixels.data() +
+                                        static_cast<size_t>(y0 + ty) * width + x0;
+                        if (bits_per_sample == 8)
+                        {
+                            for (uint32_t x = 0; x < copy_width; ++x)
+                            {
+                                dst[x] = src[x];
+                            }
+                        }
+                        else
+                        {
+                            std::memcpy(dst, src, static_cast<size_t>(copy_width) * 2);
+                            if (byte_swapped)
+                            {
+                                swap_bytes_16(dst, copy_width);
+                            }
+                        }
+                    }
                 }
             }
-            else
+        }
+        else
+        {
+            // 逐行读取（stripped TIFF）。
+            const tsize_t scanline_size = TIFFScanlineSize(tif.get());
+            if (scanline_size < static_cast<tsize_t>(width) * bytes_per_pixel)
             {
-                std::memcpy(pixels.data() + base, row_buffer.data(),
-                            static_cast<size_t>(width) * 2);
+                return std::unexpected("TIFF 扫描行尺寸异常（小于图像宽度 × 每像素字节数）");
+            }
+            std::vector<uint8_t> row_buffer(static_cast<size_t>(scanline_size));
+            for (uint32_t row = 0; row < height; ++row)
+            {
+                if (TIFFReadScanline(tif.get(), row_buffer.data(), row) < 0)
+                {
+                    return std::unexpected(std::format("读取 TIFF 第 {} 行失败", row));
+                }
+                const size_t base = static_cast<size_t>(row) * width;
+                if (bits_per_sample == 8)
+                {
+                    for (uint32_t x = 0; x < width; ++x)
+                    {
+                        pixels[base + x] = row_buffer[x];
+                    }
+                }
+                else
+                {
+                    std::memcpy(pixels.data() + base, row_buffer.data(),
+                                static_cast<size_t>(width) * 2);
+                    if (byte_swapped)
+                    {
+                        swap_bytes_16(pixels.data() + base, width);
+                    }
+                }
             }
         }
 
@@ -110,6 +219,7 @@ namespace voilut
             .height = height,
             .bits_per_sample = bits_per_sample,
             .samples_per_pixel = samples_per_pixel,
+            .frame_count = page_count,
             .min_value = stats.min_value,
             .max_value = stats.max_value,
             .p1 = stats.p1,
@@ -117,6 +227,8 @@ namespace voilut
             .value_range = stats.value_range,
         };
         image.pixels = std::move(pixels);
+        // PHOTOMETRIC_MINISWHITE 与 DICOM MONOCHROME1 一样需要初始反色。
+        image.initial_invert = photometric == PHOTOMETRIC_MINISWHITE;
         return image;
     }
 } // namespace voilut

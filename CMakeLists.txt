@@ -71,6 +71,33 @@ else()
 endif()
 
 # ------------------------------------------------------------
+# 纯计算库与单元测试（可无依赖构建）
+# ------------------------------------------------------------
+# 纯计算部分单独成库：不链接 Dawn / GDCM / libtiff，可以在无 GPU、无第三方依赖
+# 的环境下直接构建与测试，也被 windower 与单元测试共用（避免重复编译）。
+# CI 用 `-DVOILUT_MODEL_ONLY=ON` 只构建这一层，秒级反馈。
+option(VOILUT_MODEL_ONLY "只构建 voilut_model 与单元测试（无 Dawn/GDCM/TIFF）" OFF)
+
+add_library(voilut_model STATIC
+  imaging/src/image_model.cxx
+)
+target_include_directories(voilut_model PUBLIC imaging/include)
+target_compile_options(voilut_model PRIVATE ${PROJECT_WARNINGS})
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(window_model_test tests/window_model_test.cxx)
+  target_link_libraries(window_model_test PRIVATE voilut_model)
+  target_compile_options(window_model_test PRIVATE ${PROJECT_WARNINGS})
+  add_test(NAME window_model_test COMMAND window_model_test)
+endif()
+
+if(VOILUT_MODEL_ONLY)
+  message(STATUS "VOILUT_MODEL_ONLY：只构建 voilut_model 与 window_model_test")
+  return()
+endif()
+
+# ------------------------------------------------------------
 # 依赖查找
 # ------------------------------------------------------------
 # 发行选项：静态链接除 glibc 与系统显卡驱动外的全部依赖，产物只有一个可执行文件。
@@ -332,14 +359,7 @@ endif()
 # ------------------------------------------------------------
 # imaging：窗宽窗位核心库（静态库）
 # ------------------------------------------------------------
-# 纯计算部分单独成库：不链接 Dawn / GDCM，可以在无 GPU 环境下直接测试、
-# 也被 windower 与单元测试共用（避免重复编译 image_model.cxx）。
-add_library(voilut_model STATIC
-  imaging/src/image_model.cxx
-)
-target_include_directories(voilut_model PUBLIC imaging/include)
-target_compile_options(voilut_model PRIVATE ${PROJECT_WARNINGS})
-
+# 纯计算部分见文件开头的 voilut_model（可在无依赖环境下单独构建）。
 # 职责：解码 16 位像素 → 统计（直方图 / p1 p99）→ 窗设置 → GPU 渲染管线。
 add_library(voilut STATIC
   imaging/src/image_renderer.cxx
@@ -442,14 +462,17 @@ if(WIN32 AND NOT VOILUT_PORTABLE)
 endif()
 
 # ------------------------------------------------------------
-# 单元测试（纯计算，不需要 GPU / 窗口）
+# 解码测试（需要 libtiff；fixtures 由测试代码现场生成，不入库）
 # ------------------------------------------------------------
-include(CTest)
 if(BUILD_TESTING)
-  add_executable(window_model_test tests/window_model_test.cxx)
-  target_link_libraries(window_model_test PRIVATE voilut_model)
-  target_compile_options(window_model_test PRIVATE ${PROJECT_WARNINGS})
-  add_test(NAME window_model_test COMMAND window_model_test)
+  add_executable(decode_test
+    tests/decode_test.cxx
+    imaging/src/decode/tiff_decode.cxx
+  )
+  target_include_directories(decode_test PRIVATE imaging/include)
+  target_compile_options(decode_test PRIVATE ${PROJECT_WARNINGS})
+  target_link_libraries(decode_test PRIVATE voilut_model ${TIFF_LINK_LIBRARIES})
+  add_test(NAME decode_test COMMAND decode_test)
 endif()
 
 # ------------------------------------------------------------

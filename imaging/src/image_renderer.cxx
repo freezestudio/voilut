@@ -3,9 +3,11 @@
 
 #include "image_renderer.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <format>
+#include <vector>
 
 #include "context.h"
 #include "shader_loader.h"
@@ -22,6 +24,51 @@ namespace voilut
 
         /// @brief 顶点步长：pos.xy + uv.xy = 4 个 float。
         constexpr uint64_t kVertexStride = sizeof(float) * 4;
+
+        /// @brief mipmap 层数：一直降采样到 1×1（供缩小显示时按 LOD 采样）。
+        uint32_t mip_level_count(uint32_t width, uint32_t height) noexcept
+        {
+            uint32_t levels = 1;
+            for (uint32_t size = std::max(width, height); size > 1; size /= 2)
+            {
+                ++levels;
+            }
+            return levels;
+        }
+
+        /// @brief 2×2 盒式滤波降采样（边缘重复采样，避免越界）。
+        /// @param src 源像素。
+        /// @param src_width 源宽。
+        /// @param src_height 源高。
+        /// @param out_width 输出宽（`max(1, src_width/2)`）。
+        /// @param out_height 输出高。
+        /// @return 降采样后的像素。
+        std::vector<uint16_t> downsample_2x2(std::span<const uint16_t> src, uint32_t src_width,
+                                             uint32_t src_height, uint32_t &out_width,
+                                             uint32_t &out_height)
+        {
+            out_width = std::max(1u, src_width / 2);
+            out_height = std::max(1u, src_height / 2);
+            std::vector<uint16_t> dst(static_cast<size_t>(out_width) * out_height);
+            for (uint32_t y = 0; y < out_height; ++y)
+            {
+                const uint32_t y0 = std::min(y * 2, src_height - 1);
+                const uint32_t y1 = std::min(y * 2 + 1, src_height - 1);
+                for (uint32_t x = 0; x < out_width; ++x)
+                {
+                    const uint32_t x0 = std::min(x * 2, src_width - 1);
+                    const uint32_t x1 = std::min(x * 2 + 1, src_width - 1);
+                    const uint32_t sum = src[static_cast<size_t>(y0) * src_width + x0] +
+                                         src[static_cast<size_t>(y0) * src_width + x1] +
+                                         src[static_cast<size_t>(y1) * src_width + x0] +
+                                         src[static_cast<size_t>(y1) * src_width + x1];
+                    // +2 实现四舍五入；和最大 4×65535，不会溢出 uint32。
+                    dst[static_cast<size_t>(y) * out_width + x] =
+                        static_cast<uint16_t>((sum + 2) / 4);
+                }
+            }
+            return dst;
+        }
     } // namespace
 
     ImageRenderer::ImageRenderer(Context &context) : context_(context) {}
@@ -74,32 +121,96 @@ namespace voilut
         update_quad();
     }
 
-    void ImageRenderer::upload(uint32_t width, uint32_t height, std::span<const uint16_t> pixels)
+    std::expected<void, std::string> ImageRenderer::upload(uint32_t width, uint32_t height,
+                                                          std::span<const uint16_t> pixels)
     {
+        if (width == 0 || height == 0)
+        {
+            return std::unexpected(std::string("图像尺寸为 0"));
+        }
+        if (pixels.size() < static_cast<size_t>(width) * height)
+        {
+            return std::unexpected(std::string("像素数据长度不足"));
+        }
+        // 设备上限由 Context 请求（Dawn 默认只给 8192，科研图像很容易超）。
+        if (width > context_.max_texture_dimension || height > context_.max_texture_dimension)
+        {
+            return std::unexpected(std::format(
+                "图像 {}×{} 超过设备最大纹理边长 {}（可在更高上限的 GPU 上运行，"
+                "或后续通过分块显示支持更大图像）",
+                width, height, context_.max_texture_dimension));
+        }
+
         image_width_ = width;
         image_height_ = height;
         image_bind_group_ = nullptr;
 
+        const uint32_t level_count = mip_level_count(width, height);
         wgpu::TextureDescriptor texDesc{
             .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
             .dimension = wgpu::TextureDimension::e2D,
             .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
             .format = kImageFormat,
-            .mipLevelCount = 1,
+            .mipLevelCount = level_count,
             .sampleCount = 1,
         };
-        image_texture_ = context_.device.CreateTexture(&texDesc);
 
-        const wgpu::TexelCopyTextureInfo destination{.texture = image_texture_};
-        const wgpu::TexelCopyBufferLayout layout{
-            .offset = 0,
-            .bytesPerRow = width * 2,
-            .rowsPerImage = height,
-        };
-        const wgpu::Extent3D writeSize{.width = width, .height = height, .depthOrArrayLayers = 1};
-        context_.device.GetQueue().WriteTexture(&destination, pixels.data(),
-                                                pixels.size() * sizeof(uint16_t), &layout,
-                                                &writeSize);
+        try
+        {
+            image_texture_ = context_.device.CreateTexture(&texDesc);
+
+            // 第 0 层直接写原图；其后每层由上一层 2×2 盒式滤波得到。
+            {
+                const wgpu::TexelCopyTextureInfo destination{.texture = image_texture_};
+                const wgpu::TexelCopyBufferLayout layout{
+                    .offset = 0,
+                    .bytesPerRow = width * 2,
+                    .rowsPerImage = height,
+                };
+                const wgpu::Extent3D write_size{
+                    .width = width, .height = height, .depthOrArrayLayers = 1};
+                context_.device.GetQueue().WriteTexture(&destination, pixels.data(),
+                                                        pixels.size() * sizeof(uint16_t), &layout,
+                                                        &write_size);
+            }
+
+            std::span<const uint16_t> source = pixels;
+            uint32_t source_width = width;
+            uint32_t source_height = height;
+            std::vector<uint16_t> level_pixels;
+            for (uint32_t level = 1; level < level_count; ++level)
+            {
+                uint32_t level_width = 1;
+                uint32_t level_height = 1;
+                std::vector<uint16_t> next =
+                    downsample_2x2(source, source_width, source_height, level_width, level_height);
+
+                const wgpu::TexelCopyTextureInfo destination{
+                    .texture = image_texture_,
+                    .mipLevel = level,
+                };
+                const wgpu::TexelCopyBufferLayout layout{
+                    .offset = 0,
+                    .bytesPerRow = level_width * 2,
+                    .rowsPerImage = level_height,
+                };
+                const wgpu::Extent3D write_size{
+                    .width = level_width, .height = level_height, .depthOrArrayLayers = 1};
+                context_.device.GetQueue().WriteTexture(
+                    &destination, next.data(), next.size() * sizeof(uint16_t), &layout,
+                    &write_size);
+
+                level_pixels = std::move(next);
+                source = level_pixels;
+                source_width = level_width;
+                source_height = level_height;
+            }
+        }
+        catch (const std::bad_alloc &)
+        {
+            image_texture_ = nullptr;
+            return std::unexpected(std::string("内存不足：生成 mipmap 时分配失败"));
+        }
 
         const wgpu::BindGroupEntry entry{
             .binding = 0,
@@ -113,12 +224,18 @@ namespace voilut
         image_bind_group_ = context_.device.CreateBindGroup(&bgDesc);
 
         update_quad();
+        return {};
     }
 
     void ImageRenderer::set_window(double level, double width)
     {
         params_.level = static_cast<float>(level);
         params_.width = static_cast<float>(width);
+    }
+
+    void ImageRenderer::set_voi_mode(VoiMode mode)
+    {
+        params_.mode = mode == VoiMode::Dicom ? 1.0f : 0.0f;
     }
 
     void ImageRenderer::set_invert(bool invert)

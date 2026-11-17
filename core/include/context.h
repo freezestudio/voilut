@@ -92,6 +92,7 @@ namespace voilut
         wgpu::Device device;                                         ///< 设备（创建资源、提交命令）。
         wgpu::Surface surface;                                       ///< 显示表面。
         wgpu::TextureFormat format = wgpu::TextureFormat::Undefined; ///< 表面纹理格式。
+        uint32_t max_texture_dimension = 8192; ///< 已请求的最大 2D 纹理边长（≥ 8192）。
 
     private:
         /// @name 内部异步步骤

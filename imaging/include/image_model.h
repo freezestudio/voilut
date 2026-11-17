@@ -22,6 +22,7 @@ namespace voilut
         uint32_t height = 0;
         uint32_t bits_per_sample = 0;
         uint32_t samples_per_pixel = 1;
+        uint32_t frame_count = 1;   ///< 帧数（多页 TIFF / 多帧 DICOM；目前只显示首帧）。
         double min_value = 0.0;
         double max_value = 0.0;
         double p1 = 0.0;
@@ -155,11 +156,23 @@ namespace voilut
     ///       （窄窗时步进更小，宽窗时步进更大）。
     [[nodiscard]] WindowSetting drag_window(WindowSetting &window, double dx, double dy) noexcept;
 
+    /// @brief 像素值 → 显示灰度系数的映射公式。
+    /// @details 两种模式只影响「窗 → 灰度」的线性区间与边界，不影响自动窗 / ROI 窗的计算。
+    /// @note C++ 侧 `display_ratio` 与 `shaders/image.wgsl` 必须同时支持两种模式。
+    enum class VoiMode
+    {
+        Simplified, ///< 本项目简化公式：`(v - (L - W/2)) / W`（默认，整数域更直观）。
+        Dicom,      ///< DICOM PS3.3 C.11.2.1.2.1 精确公式：下界 `L-0.5-(W-1)/2`，分母 `W-1`。
+    };
+
     /// @brief 像素值 → 显示灰度系数（0..1）。
     /// @param value 像素值。
     /// @param window 窗设置。
     /// @param invert 是否反色。
+    /// @param mode 映射公式（默认简化公式）。
     /// @return 映射后的灰度系数；超出窗范围时限制到 0 或 1。
+    /// @note DICOM 模式下 `width == 1` 退化为阈值：`value > level - 0.5` 输出 1。
     [[nodiscard]] double display_ratio(double value, const WindowSetting &window,
-                                       bool invert = false) noexcept;
+                                       bool invert = false,
+                                       VoiMode mode = VoiMode::Simplified) noexcept;
 } // namespace voilut

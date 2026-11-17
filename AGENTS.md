@@ -57,8 +57,11 @@
 
 - 代码改动后必须 `cmake --build build` 通过，无新增警告。
 - 涉及窗宽窗位数值语义时，至少验证：自动窗、ROI 窗、拖动调窗、预设窗
-  四条路径都能改变显示。前四条已有 CTest 覆盖，先跑 `ctest --test-dir build --output-on-failure`；
-  涉及解码 / 渲染时再用真实 TIFF/DICOM 图像跑一次 `./build/windower <图像>`。
+  四条路径都能改变显示，且 VOI 两种公式的边界值正确。前四项与 VOI 已有 CTest 覆盖，
+  先跑 `ctest --test-dir build --output-on-failure`（window_model_test + decode_test）；
+  涉及渲染时再用真实 TIFF/DICOM 图像跑一次 `./build/windower <图像>`。
+- 无依赖环境（CI）用 `cmake -B build -DVOILUT_MODEL_ONLY=ON`，只构建 
+  `voilut_model` + `window_model_test`，秒级完成。
 - 纯计算逻辑一律放进 `voilut_model`（`imaging/src/image_model.cxx`），
   不要依赖 Dawn / 窗口系统，以便无 GPU 环境下测试。
 - 头文件注释改动后跑 `doxygen Doxyfile`，确认无 `WARN_IF_DOC_ERROR` 报警。
@@ -83,6 +86,19 @@
   - 主循环前 3 帧使用 `glfwPollEvents` 预热，让字体图集与布局稳定。
 - `std::println` 在 stdout 重定向时是全缓冲：`main` 中已设置行缓冲，
   否则日志文件里看不到「已加载 …」。
+
+## 窗宽窗位映射与显示
+
+- `WindowParams`（32 字节）与 `shaders/image.wgsl` 逐字段一致；`mode` 字段区分
+  简化公式（默认）与 DICOM 精确公式（C.11.2.1.2.1）。改公式必须同时改
+  `display_ratio` 与 WGSL，并在 `tests/window_model_test.cxx` 覆盖两种模式。
+- 大图：`Context` 向 adapter 请求 `min(adapter.maxTextureDimension2D, 16384)`；
+  `ImageRenderer::upload` 返回 `expected`，超限/内存不足必须走错误弹窗，不得忽略。
+- mipmap 由 CPU 盒式滤波生成（`r16uint` 不能由采样器生成），着色器按 UV 导数选 LOD；
+  缩图质量依赖这条链，不要回退成只读 level 0。
+- TIFF：tiled、多页计数、大端字节交换、`PHOTOMETRIC_MINISWHITE` 均已处理；
+  多帧 DICOM 必须按 `GetBufferLength()` 全量分配（目前只显示第 1 帧），
+  按单帧分配会堆溢出。浮点 TIFF 明确拒绝。
 
 ## 发行构建（单文件）
 

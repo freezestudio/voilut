@@ -15,6 +15,7 @@
 
 #include "context.h"
 
+#include <algorithm>
 #include <format>
 #include <iostream>
 #include <stdexcept>
@@ -136,7 +137,22 @@ namespace voilut
     // ------------------------------------------------------------
     task<void> Context::RequestDeviceAsync()
     {
+        // 科研图像（显微镜、工业 CT、全切片）常超过 WebGPU 默认的 8192 边长。
+        // 先查 adapter 上限，再请求一个不超过它的值；超过部分由渲染器明确报错。
+        wgpu::Limits adapter_limits{};
+        if (adapter.GetLimits(&adapter_limits) != wgpu::Status::Success ||
+            adapter_limits.maxTextureDimension2D == wgpu::kLimitU32Undefined)
+        {
+            throw std::runtime_error("无法查询 adapter 的纹理尺寸上限");
+        }
+        constexpr uint32_t kPreferredTextureDimension = 16384;
+        wgpu::Limits required{};
+        required.maxTextureDimension2D =
+            std::min(adapter_limits.maxTextureDimension2D, kPreferredTextureDimension);
+        max_texture_dimension = required.maxTextureDimension2D;
+
         wgpu::DeviceDescriptor desc{};
+        desc.requiredLimits = &required;
         // 未捕获错误回调：GPU 校验失败、内存错误等都会输出到这里，便于调试
         desc.SetUncapturedErrorCallback(
             [](const wgpu::Device &, wgpu::ErrorType errorType, wgpu::StringView message)

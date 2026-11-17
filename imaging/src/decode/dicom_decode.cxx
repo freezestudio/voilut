@@ -8,6 +8,7 @@
 #include <cstdlib> // std::strtod
 #include <cstring> // std::memcpy
 #include <format>
+#include <new> // std::bad_alloc
 #include <optional>
 #include <string>
 #include <vector>
@@ -106,12 +107,13 @@ namespace voilut
         /// @param bits_stored 有效位数。
         /// @param is_signed 像素是否为有符号。
         /// @param monochrome1 光度解释是否为 MONOCHROME1（需反色）。
+        /// @param frame_count 帧数（多帧只取第 1 帧，但缓冲区按全部帧大小分配）。
         /// @param dataset 数据集（用于读取 Rescale / 窗设置）。
         /// @return 成功返回 `DecodedImage`，失败返回错误说明。
         std::expected<DecodedImage, std::string> assemble_decoded(
             const std::string &path, const uint8_t *raw, unsigned int width, unsigned int height,
             unsigned int bits_allocated, unsigned int bits_stored, bool is_signed, bool monochrome1,
-            const gdcm::DataSet &dataset)
+            unsigned int frame_count, const gdcm::DataSet &dataset)
         {
             if (width == 0 || height == 0)
             {
@@ -183,6 +185,7 @@ namespace voilut
                 .height = height,
                 .bits_per_sample = bits_stored,
                 .samples_per_pixel = 1,
+                .frame_count = std::max(1u, frame_count),
                 .min_value = stats.min_value,
                 .max_value = stats.max_value,
                 .p1 = stats.p1,
@@ -243,9 +246,31 @@ namespace voilut
                     return std::unexpected(std::string("仅支持 MONOCHROME 光度解释的 DICOM"));
                 }
 
-                // GDCM 已按传输语法解压，此处得到的是原始像素字节；统一转换为 16 位
+                // GDCM 已按传输语法解压，此处得到的是原始像素字节；统一转换为 16 位。
+                // 多帧时 GetBuffer 会写入「全部帧」长度的数据（GetBufferLength 已乘帧数），
+                // 因此必须按全量分配，否则会堆溢出；目前只显示第 1 帧。
                 const size_t count = static_cast<size_t>(width) * height;
-                std::vector<uint8_t> buffer(count * (bits_allocated / 8));
+                const unsigned int frame_count =
+                    image.GetNumberOfDimensions() >= 3 ? image.GetDimensions()[2] : 1;
+                const size_t expected = count * (bits_allocated / 8) * std::max(1u, frame_count);
+                const size_t buffer_length = image.GetBufferLength();
+                if (buffer_length < expected)
+                {
+                    return std::unexpected(std::format(
+                        "DICOM 像素缓冲区异常：需要至少 {} 字节，实际 {} 字节", expected,
+                        buffer_length));
+                }
+                std::vector<uint8_t> buffer;
+                try
+                {
+                    buffer.resize(buffer_length);
+                }
+                catch (const std::bad_alloc &)
+                {
+                    return std::unexpected(std::format(
+                        "内存不足：无法为 {}×{}×{} 帧的 DICOM 分配像素缓冲区", width, height,
+                        frame_count));
+                }
                 if (!image.GetBuffer(reinterpret_cast<char *>(buffer.data())))
                 {
                     return std::unexpected(std::string("DICOM 像素数据解码失败"));
@@ -254,7 +279,7 @@ namespace voilut
                 return assemble_decoded(path, buffer.data(), width, height, bits_allocated,
                                         bits_stored, is_signed,
                                         photo == gdcm::PhotometricInterpretation::MONOCHROME1,
-                                        reader.GetFile().GetDataSet());
+                                        frame_count, reader.GetFile().GetDataSet());
             }
         }
 
@@ -317,17 +342,20 @@ namespace voilut
             {
                 return std::unexpected(std::string("DICOM 像素数据不是原始字节（可能为封装格式）"));
             }
-            const size_t expected =
+            const size_t frame_bytes =
                 static_cast<size_t>(*columns) * *rows * (*bits_allocated / 8);
-            if (pixel_bytes->GetLength() < expected)
+            if (pixel_bytes->GetLength() < frame_bytes)
             {
                 return std::unexpected(std::string("DICOM 像素数据长度不足"));
             }
+            // 未知 SOP 的兼容路径按原始长度推算帧数（只解码第 1 帧）。
+            const unsigned int frame_count = static_cast<unsigned int>(
+                std::max<size_t>(1, pixel_bytes->GetLength() / std::max<size_t>(1, frame_bytes)));
 
             return assemble_decoded(
                 path, reinterpret_cast<const uint8_t *>(pixel_bytes->GetPointer()), *columns, *rows,
                 *bits_allocated, bits_stored, pixel_representation != 0,
-                photometric == "MONOCHROME1", dataset);
+                photometric == "MONOCHROME1", frame_count, dataset);
         }
     }
 } // namespace voilut

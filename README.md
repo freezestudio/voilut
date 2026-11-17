@@ -20,6 +20,9 @@ voilut 把这一流程拆成可复用的库：解码 → 统计 → 定窗 → G
   拖动调窗时无额外拷贝、无 CPU 回读
 - **着色器内双线性插值**：`r16uint` 不能直接线性采样，着色器按 4 邻域加权，
   放大观察时保留细节（最近邻 / 双线性可切换）
+- **大图与缩图质量**：向 adapter 请求更大的纹理边长（最高 16384，Dawn 默认仅 8192），
+  超过时给出明确错误；缩小时按 mipmap LOD 采样（CPU 盒式滤波生成），避免大图锯齿
+- **VOI 公式可选**：默认简化公式；菜单可切换 DICOM PS3.3 精确公式（`W-1` 分母）
 - **自动定窗**：65536 桶直方图一次遍历得到 min/max 与 p1/p99，
   默认窗取 `(p1+p99)/2 ± (p99-p1)/2`
 - **ROI（感兴趣区域）实时窗**：左键拖动框选区域，按框内统计重新定窗（实时跟随拖动）
@@ -32,8 +35,9 @@ voilut 把这一流程拆成可复用的库：解码 → 统计 → 定窗 → G
 - **ROI 记录**：把当前 ROI 以原图坐标保存，操作记录面板显示区域、尺寸与窗值
 - **菜单栏**：文件 / 图像 / 视图，支持打开目录、重置、预设窗与面板显隐
 - **探针**：悬停显示原始像素值及经窗映射后的显示灰度
-- **解码**：TIFF（libtiff，含 16 位灰度与常见压缩）、DICOM（GDCM，
-  含压缩传输语法、WindowCenter/WindowWidth 标签、Rescale Slope/Intercept）
+- **解码**：TIFF（libtiff，8/16 位灰度、stripped / tiled、多页计数、大端、MINISWHITE、
+  常见压缩）、DICOM（GDCM，含压缩传输语法、WindowCenter/WindowWidth 标签、
+  Rescale Slope/Intercept）；浮点 TIFF 与多帧/多页文件目前只显示第 1 帧
 - **Windows / Linux**：Dawn（Vulkan / D3D12）统一后端，两个平台共用同一套代码
 
 ---
@@ -76,10 +80,17 @@ bash scripts/install_deps.sh        # = install_dawn.sh + install_gdcm.sh + inst
 ```bash
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build              # 纯计算单元测试（无需 GPU）
+ctest --test-dir build              # 纯计算单测 + TIFF 解码回归（无需 GPU）
 ./build/windower 图像.tif          # 或 .dcm
 ./build/windower ./samples/一组图像/  # 目录会展开成图像列表
 ./build/windower                   # 无参数：窗口内「打开文件夹...」或拖放
+```
+
+无依赖快速构建（只编译纯计算库与测试，CI 用）：
+
+```bash
+cmake -B build-model -G Ninja -DVOILUT_MODEL_ONLY=ON
+cmake --build build-model && ctest --test-dir build-model
 ```
 
 Windows（MSVC + vcpkg）：
@@ -146,6 +157,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 `
 > Windows 端 CMake 已固定 `DAWN_USE_BUILT_DXC=OFF`：D3D12 走系统自带的
 > `d3dcompiler_47.dll`（FXC / Shader Model 5.1），不需要 `dxcompiler.dll`、
 > `dxil.dll`。若手动打开该选项，产物就需要额外随包这两个 DLL。
+>
+> 大图的纹理上限取决于 GPU：程序会请求 adapter 支持的上限（封顶 16384），
+> 本机 adapter 若只支持 8192，超过的图像会弹出错误而不是静默空白。
 
 ---
 
@@ -181,6 +195,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 `
 菜单栏「视图」可以分别显示或隐藏「窗宽窗位」和「操作记录」面板；
 「显示全部面板」/「隐藏全部面板」可一键切换。
 
+菜单栏「图像 → DICOM 精确 VOI」可在两种映射公式之间切换：
+默认的简化公式，或 DICOM PS3.3 C.11.2.1.2.1 的线性 VOI LUT 公式。
+
 ---
 
 ## 四、结构
@@ -201,7 +218,8 @@ imaging/   窗宽窗位核心（静态库 voilut；纯计算部分为 voilut_mod
 
 apps/      windower.cxx —— 可执行程序 windower
 shaders/   image.wgsl  —— 窗宽窗位映射的实现
-tests/     window_model_test.cxx —— 四条调窗路径的单元测试（CTest）
+tests/     window_model_test.cxx —— 调窗与 VOI 公式单测（CTest）
+           decode_test.cxx       —— TIFF 解码回归（fixtures 由测试现场生成）
 ```
 
 数据流：
@@ -218,11 +236,21 @@ tests/     window_model_test.cxx —— 四条调窗路径的单元测试（CTes
                               image.wgsl：值 → 窗映射 → 灰度
 ```
 
-映射公式（着色器与 CPU 侧 `display_ratio` 完全一致）：
+映射公式（着色器与 CPU 侧 `display_ratio` 双模式完全一致）：
 
 ```
-lower  = level - width / 2
-gray   = clamp((value - lower) / width, 0, 1)   // 反色时取 1 - gray
+简化（默认）：
+  lower = level - width / 2
+  gray  = clamp((value - lower) / width, 0, 1)
+
+DICOM 精确（菜单「图像 → DICOM 精确 VOI」）：
+  center = level - 0.5
+  lower  = center - (width - 1) / 2
+  upper  = center + (width - 1) / 2
+  gray   = clamp((value - center) / (width - 1) + 0.5, 0, 1)
+  // width == 1 时退化为阈值：value > level - 0.5 → 1
+
+反色（两种模式一致）：gray = 1 - gray
 ```
 
 ---

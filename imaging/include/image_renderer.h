@@ -31,7 +31,7 @@ namespace voilut
         float invert = 0.0f;     ///< 反色开关（>0.5 反色）。
         float linear = 0.0f;     ///< 插值开关（>0.5 双线性）。
         float transform = 0.0f;  ///< 显示方向编码（见 `encode_orientation`）。
-        float pad0 = 0.0f;       ///< 对齐填充。
+        float mode = 0.0f;       ///< 映射公式：0 = 简化，1 = DICOM 精确（见 `VoiMode`）。
         float pad1 = 0.0f;       ///< 对齐填充。
         float pad2 = 0.0f;       ///< 对齐填充。
     };
@@ -57,14 +57,21 @@ namespace voilut
         /// @param css_height 视口高。
         void resize(double css_width, double css_height);
 
-        /// @brief 上传 16 位像素（会重建 GPU 纹理）。
+        /// @brief 上传 16 位像素（会重建 GPU 纹理与 mipmap 链）。
         /// @param width 图像宽。
         /// @param height 图像高。
         /// @param pixels 行优先的 16 位像素。
-        void upload(uint32_t width, uint32_t height, std::span<const uint16_t> pixels);
+        /// @return 成功为空；图像超过设备纹理上限或内存不足时返回错误说明。
+        /// @note mipmap 链由 CPU 盒式滤波生成，供缩小显示时避免锯齿（r16uint 无法
+        ///       用采样器生成 mipmap）。
+        [[nodiscard("upload 必须检查返回值")]]
+        std::expected<void, std::string> upload(uint32_t width, uint32_t height,
+                                                 std::span<const uint16_t> pixels);
 
         /// @brief 设置窗宽窗位。
         void set_window(double level, double width);
+        /// @brief 设置映射公式（简化 / DICOM 精确）。
+        void set_voi_mode(VoiMode mode);
         /// @brief 设置是否反色。
         void set_invert(bool invert);
         /// @brief 设置是否线性插值。

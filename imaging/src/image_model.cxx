@@ -203,8 +203,41 @@ namespace voilut
         return window;
     }
 
-    double display_ratio(double value, const WindowSetting &window, bool invert) noexcept
+    double display_ratio(double value, const WindowSetting &window, bool invert,
+                         VoiMode mode) noexcept
     {
+        if (mode == VoiMode::Dicom)
+        {
+            // DICOM PS3.3 C.11.2.1.2.1（线性 VOI LUT）：
+            //   下界 = L - 0.5 - (W-1)/2，上界 = L - 0.5 + (W-1)/2
+            //   W == 1 时退化为阈值（分母为 0）。
+            const double width = std::max(window.width, 1e-6);
+            double ratio = 0.0;
+            if (width <= 1.0)
+            {
+                ratio = value > window.level - 0.5 ? 1.0 : 0.0;
+            }
+            else
+            {
+                const double center = window.level - 0.5;
+                const double lower = center - (width - 1.0) * 0.5;
+                const double upper = center + (width - 1.0) * 0.5;
+                if (value <= lower)
+                {
+                    ratio = 0.0;
+                }
+                else if (value > upper)
+                {
+                    ratio = 1.0;
+                }
+                else
+                {
+                    ratio = std::clamp((value - center) / (width - 1.0) + 0.5, 0.0, 1.0);
+                }
+            }
+            return invert ? 1.0 - ratio : ratio;
+        }
+
         const double width = std::max(window.width, 1e-6);
         const double lower = window.level - width * 0.5;
         const double ratio = std::clamp((value - lower) / width, 0.0, 1.0);

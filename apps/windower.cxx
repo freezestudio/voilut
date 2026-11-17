@@ -151,6 +151,12 @@ namespace
         std::unordered_map<std::string, voilut::WindowSetting> remembered;
         bool remember_window = true;
 
+        // 显示与 UI。
+        voilut::VoiMode voi_mode = voilut::VoiMode::Simplified; ///< 映射公式（简化 / DICOM）。
+        float ui_scale = 1.0f;                                  ///< HiDPI 缩放（按显示内容比例）。
+        std::string error_message;                              ///< 最近一次错误的说明。
+        bool error_pending = false;                             ///< 是否有待弹出的错误。
+
         bool quit_requested = false; ///< 退出请求（Esc / 关闭按钮）。
     };
 
@@ -201,6 +207,18 @@ namespace
             std::clamp(state->window_setting.level, state->level_min, state->level_max);
         state->window_setting.width = std::clamp(state->window_setting.width, 1.0, 65535.0);
         state->renderer->set_window(state->window_setting.level, state->window_setting.width);
+    }
+
+    /// @brief 记录并弹出一次错误（同时保留 stdout 日志）。
+    void report_error(AppState *state, std::string message)
+    {
+        std::println("错误: {}", message);
+        state->error_message = std::move(message);
+        state->error_pending = true;
+        if (state->window != nullptr)
+        {
+            glfwPostEmptyEvent();
+        }
     }
 
     /// @brief 适应视口（等比缩放并居中）。
@@ -411,6 +429,18 @@ namespace
             state->remembered[state->current_path] = state->window_setting;
         }
 
+        // 先上传纹理：失败时保留当前图像，并向用户报告原因（例如超过纹理上限）。
+        if (state->renderer != nullptr)
+        {
+            if (auto uploaded =
+                    state->renderer->upload(image.meta.width, image.meta.height, image.pixels);
+                !uploaded)
+            {
+                report_error(state, uploaded.error());
+                return;
+            }
+        }
+
         *state->image = std::move(image);
         state->current_path = path;
 
@@ -426,7 +456,6 @@ namespace
         state->roi_start_y = 0.0;
         state->roi_image = {};
 
-        state->renderer->upload(meta.width, meta.height, state->image->pixels);
         state->renderer->set_invert(state->invert);
         state->renderer->set_interpolation(state->linear);
         state->renderer->set_orientation(state->orientation);
@@ -456,6 +485,10 @@ namespace
         std::println("已加载 {}（{}x{}，{} bit，值域 {} ~ {}）", state->image->name, meta.width,
                      meta.height, meta.bits_per_sample, static_cast<long long>(meta.min_value),
                      static_cast<long long>(meta.max_value));
+        if (meta.frame_count > 1)
+        {
+            std::println("多帧/多页文件：共 {} 帧，当前只显示第 1 帧", meta.frame_count);
+        }
     }
 
     /// @brief 解码并显示图像列表中的第 `index` 项。
@@ -472,13 +505,13 @@ namespace
         const auto kind = voilut::kind_from_name(path);
         if (!kind)
         {
-            std::println("无法识别的图像格式：{}", path);
+            report_error(state, std::format("无法识别的图像格式：{}", path));
             return;
         }
         auto decoded = voilut::decode_image(path, *kind);
         if (!decoded)
         {
-            std::println("解码失败：{}", decoded.error());
+            report_error(state, std::format("解码失败：{}", decoded.error()));
             return;
         }
         apply_image(state, std::move(decoded.value()), path);
@@ -526,7 +559,7 @@ namespace
         const auto images = voilut::collect_images(dir);
         if (images.empty())
         {
-            std::println("目录中没有可加载的图像：{}", dir);
+            report_error(state, std::format("目录中没有可加载的图像：{}", dir));
             return;
         }
         state->playlist = images;
@@ -766,6 +799,15 @@ namespace
                 state->renderer->set_interpolation(state->linear);
             }
             item_tooltip("放大时使用双线性插值");
+
+            if (menu_item("DICOM 精确 VOI", nullptr, state->voi_mode == voilut::VoiMode::Dicom))
+            {
+                state->voi_mode = state->voi_mode == voilut::VoiMode::Dicom
+                                      ? voilut::VoiMode::Simplified
+                                      : voilut::VoiMode::Dicom;
+                state->renderer->set_voi_mode(state->voi_mode);
+            }
+            item_tooltip("切换窗值→灰度公式：简化（W 分母）/ DICOM 精确（W-1 分母，C.11.2.1.2.1）");
 
             if (menu_item("记住窗值", nullptr, state->remember_window))
             {
@@ -1224,17 +1266,18 @@ namespace
     /// @brief 主控制面板。
     void draw_panel(AppState *state)
     {
+        const float ui = state->ui_scale;
         const float panel_top = ImGui::GetFrameHeight() + 4.0f;
         const float panel_height =
-            std::max(620.0f, ImGui::GetIO().DisplaySize.y - panel_top - 4.0f);
-        ImGui::SetNextWindowPos(ImVec2(kPanelMargin, panel_top), ImGuiCond_Always);
+            std::max(620.0f * ui, ImGui::GetIO().DisplaySize.y - panel_top - 4.0f);
+        ImGui::SetNextWindowPos(ImVec2(kPanelMargin * ui, panel_top), ImGuiCond_Always);
         // 面板覆盖在影像上，必须不透明，否则高亮区域背景会降低文字可读性。
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.09f, 0.11f, 1.0f));
         // 尺寸使用固定值：自动适应（高度为 0）要等到第二帧才生效，而本程序按需
         // 渲染（静止时阻塞在 glfwWaitEvents），首帧之后若无事件就不会重绘，
         // 面板会停在只有标题栏、高度异常的状态。
         // 用 Always 避免旧 imgui.ini 继续沿用旧尺寸，导致新布局被裁切。
-        ImGui::SetNextWindowSize(ImVec2(kPanelWidth, panel_height), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(kPanelWidth * ui, panel_height), ImGuiCond_Always);
         ImGui::Begin("Windower · 窗宽窗位");
 
         if (ImGui::Button("打开文件夹..."))
@@ -1455,7 +1498,7 @@ namespace
         if (state->hover_valid)
         {
             const double ratio = voilut::display_ratio(state->hover_value, state->window_setting,
-                                                       state->invert);
+                                                       state->invert, state->voi_mode);
             ImGui::Text("像素 (%d, %d) = %u → 显示 %d", state->hover_x, state->hover_y,
                         static_cast<unsigned>(state->hover_value),
                         static_cast<int>(std::lround(ratio * 255.0)));
@@ -1492,11 +1535,12 @@ namespace
     {
         constexpr float kHistoryWidth = 380.0f;
         constexpr float kHistoryHeight = 260.0f;
+        const float ui = state->ui_scale;
         const ImVec2 display = ImGui::GetIO().DisplaySize;
         const float top = ImGui::GetFrameHeight() + 4.0f;
-        const float x = std::max(12.0f, display.x - kHistoryWidth - 12.0f);
+        const float x = std::max(12.0f * ui, display.x - kHistoryWidth * ui - 12.0f * ui);
         ImGui::SetNextWindowPos(ImVec2(x, top), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(kHistoryWidth, kHistoryHeight), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(kHistoryWidth * ui, kHistoryHeight * ui), ImGuiCond_Always);
         ImGui::Begin("操作记录");
 
         ImGui::BeginDisabled(!state->roi_done);
@@ -1557,7 +1601,7 @@ namespace
         const std::string text =
             std::format("L {:.0f}   W {:.0f}", state->window_setting.level,
                         state->window_setting.width);
-        const ImVec2 pos(kPanelMargin + kPanelWidth + 16.0f,
+        const ImVec2 pos((kPanelMargin + kPanelWidth) * state->ui_scale + 16.0f * state->ui_scale,
                          ImGui::GetFrameHeight() + 8.0f);
         for (int dx = -1; dx <= 1; ++dx)
         {
@@ -1621,6 +1665,37 @@ namespace
         {
             draw_list->AddRect(a, b, color, 0.0f, 0, 1.5f);
         }
+    }
+
+    /// @brief 错误弹窗：用一个不可见宿主窗口承载，菜单栏隐藏时也能弹出。
+    void draw_error_popup(AppState *state)
+    {
+        ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f));
+        ImGui::SetNextWindowPos(ImVec2(-100.0f, -100.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("##error_host", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_NoMove);
+        if (state->error_pending)
+        {
+            ImGui::OpenPopup("错误##windower");
+            state->error_pending = false;
+        }
+        ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f * state->ui_scale, 0.0f),
+                                            ImVec2(760.0f * state->ui_scale, 1000.0f));
+        if (ImGui::BeginPopupModal("错误##windower", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::TextWrapped("%s", state->error_message.c_str());
+            ImGui::Separator();
+            if (ImGui::Button("确定", ImVec2(120.0f * state->ui_scale, 0.0f)))
+            {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
     }
 
     /// @brief 由启动参数构建图像列表：目录展开为其中的图像，文件按原样收集。
@@ -1724,6 +1799,11 @@ int main(int argc, char **argv)
             state.context = &context;
             state.renderer = &renderer;
             state.image = &image;
+            // HiDPI：Windows 4K / 高缩放屏幕下按内容比例放大字体与控件。
+            float scale_x = 1.0f;
+            float scale_y = 1.0f;
+            glfwGetWindowContentScale(window, &scale_x, &scale_y);
+            state.ui_scale = std::max(1.0f, std::max(scale_x, scale_y));
             state.playlist = std::move(playlist);
             state.playlist_index = 0;
             state.viewport_width = static_cast<double>(voilut::kWidth);
@@ -1754,7 +1834,10 @@ int main(int argc, char **argv)
             style.FramePadding = ImVec2(5.0f, 3.0f);
             style.ItemSpacing = ImVec2(6.0f, 4.0f);
             style.ItemInnerSpacing = ImVec2(4.0f, 3.0f);
+            ImGui::GetIO().FontGlobalScale = state.ui_scale;
+            style.ScaleAllSizes(state.ui_scale);
             load_cjk_font();
+            renderer.set_voi_mode(state.voi_mode);
             ImGui_ImplGlfw_InitForOther(window, true);
             ImGui_ImplWGPU_InitInfo init_info;
             init_info.Device = context.device.Get();
@@ -1804,6 +1887,7 @@ int main(int argc, char **argv)
                     draw_roi_history(&state);
                 }
                 draw_overlay(&state);
+                draw_error_popup(&state);
                 ImGui::Render();
 
                 wgpu::SurfaceTexture surfaceTexture;
