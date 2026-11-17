@@ -118,6 +118,9 @@
 - 解码在后台线程：`start_load` 启动 `std::async`，主循环每帧 `poll_load` 取结果，
   只有主线程做 GPU 上传。不要在主线程直接调用 `decode_image`（启动首图也已异步）。
   加载期间翻页会排队（`pending_index`），完成后自动加载。
+- 模态值：内部像素仍是存储域（有符号 +32768，uint16 纹理）；UI 的窗位/窗宽、探针、
+  ROI 记录必须经 `ValueScale::to_modality` / `to_storage` / `width_to_*` 换算。
+  `display_ratio` 与着色器继续使用存储域，不要混用。CT 的 RescaleType 会显示为 HU。
 - DICOM 语义：多组 `WindowCenter/WindowWidth` 存入 `DecodedImage::window_presets`
   （第一个作为默认窗）；`PixelPaddingValue` / `PixelPaddingRangeLimit` 换算到存储域后
   存入 `padding`，统计 / 直方图 / ROI 必须传 `ValueExclusion`，新增统计路径也不例外。

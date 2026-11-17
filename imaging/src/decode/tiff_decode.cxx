@@ -404,6 +404,7 @@ namespace voilut
         image.name = file_name_of(path);
         image.pixel_type = is_float ? DecodedImage::PixelType::Float32
                                     : DecodedImage::PixelType::UInt16;
+        image.scale.is_float = is_float;
         image.meta = {
             .width = width,
             .height = height,

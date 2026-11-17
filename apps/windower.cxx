@@ -90,6 +90,8 @@ namespace
         std::string image_path;
         voilut::Rect rect;
         voilut::WindowSetting window;
+        voilut::ValueScale scale;
+        std::string modality_unit;
     };
 
     /// @brief 应用整体状态（回调通过 GLFW 的 user pointer 获取它）。
@@ -520,6 +522,8 @@ namespace
             .image_path = state->current_path,
             .rect = state->roi_image,
             .window = state->window_setting,
+            .scale = state->image->scale,
+            .modality_unit = state->image->modality_unit,
         });
     }
 
@@ -624,6 +628,12 @@ namespace
                          meta.width, meta.height, meta.bits_per_sample,
                          static_cast<long long>(meta.min_value),
                          static_cast<long long>(meta.max_value));
+        }
+        if (!state->image->modality_unit.empty())
+        {
+            std::println("模态值（{}）：{:.6g} ~ {:.6g}", state->image->modality_unit,
+                         state->image->scale.to_modality(meta.min_value),
+                         state->image->scale.to_modality(meta.max_value));
         }
         if (meta.frame_count > 1)
         {
@@ -1626,7 +1636,17 @@ namespace
                                 meta.height, meta.bits_per_sample, meta.min_value,
                                 meta.max_value);
         }
-        const char *value_format = meta.is_float ? "%.4g" : "%.0f";
+        const voilut::ValueScale &scale = state->image->scale;
+        const bool fractional = meta.is_float || std::abs(scale.slope) != 1.0;
+        const char *value_format = fractional ? "%.4g" : "%.0f";
+        const double level_low =
+            std::min(scale.to_modality(state->level_min), scale.to_modality(state->level_max));
+        const double level_high =
+            std::max(scale.to_modality(state->level_min), scale.to_modality(state->level_max));
+        const double width_low = std::min(scale.width_to_modality(state->width_min),
+                                          scale.width_to_modality(state->width_max));
+        const double width_high = std::max(scale.width_to_modality(state->width_min),
+                                           scale.width_to_modality(state->width_max));
         if (state->image->padding.enabled)
         {
             ImGui::TextDisabled("已排除填充值 %.0f ~ %.0f（不参与统计 / 直方图 / ROI）",
@@ -1667,27 +1687,27 @@ namespace
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("窗位");
             ImGui::TableSetColumnIndex(1);
-            double level = state->window_setting.level;
+            double level = scale.to_modality(state->window_setting.level);
             ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::SliderScalar("##level", ImGuiDataType_Double, &level, &state->level_min,
-                                    &state->level_max, value_format))
+            if (ImGui::SliderScalar("##level", ImGuiDataType_Double, &level, &level_low,
+                                    &level_high, value_format))
             {
-                state->window_setting.level = level;
+                state->window_setting.level = scale.to_storage(level);
                 state->roi_windowed = false;
                 apply_window(state);
             }
             item_tooltip("拖动调整窗位；也可在右侧直接输入数值");
             ImGui::TableSetColumnIndex(2);
-            double level_input = state->window_setting.level;
+            double level_input = scale.to_modality(state->window_setting.level);
             ImGui::SetNextItemWidth(-1.0f);
             // InputDouble 不支持 EnterReturnsTrue（ImGui 会断言），改用
             // 「编辑结束」判定：回车或失焦均视为提交。
             ImGui::InputDouble("##level_input", &level_input, 0.0, 0.0,
-                               meta.is_float ? "%.6g" : "%.1f");
+                               fractional ? "%.6g" : "%.1f");
             item_tooltip("输入窗位，回车或失焦后生效");
             if (ImGui::IsItemDeactivatedAfterEdit())
             {
-                state->window_setting.level = level_input;
+                state->window_setting.level = scale.to_storage(level_input);
                 state->roi_windowed = false;
                 apply_window(state);
             }
@@ -1697,26 +1717,28 @@ namespace
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("窗宽");
             ImGui::TableSetColumnIndex(1);
-            double window_width = state->window_setting.width;
+            double window_width = scale.width_to_modality(state->window_setting.width);
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::SliderScalar("##width", ImGuiDataType_Double, &window_width,
-                                    &state->width_min, &state->width_max, value_format))
+                                    &width_low, &width_high, value_format))
             {
-                state->window_setting.width = window_width;
+                state->window_setting.width = scale.width_to_storage(window_width);
                 state->roi_windowed = false;
                 apply_window(state);
             }
             item_tooltip("拖动调整窗宽；窗宽越窄，对比度越高");
             ImGui::TableSetColumnIndex(2);
-            double width_input = state->window_setting.width;
+            double width_input = scale.width_to_modality(state->window_setting.width);
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputDouble("##width_input", &width_input, 0.0, 0.0,
-                               meta.is_float ? "%.6g" : "%.1f");
-            item_tooltip("输入窗宽，回车或失焦后生效；最小为 1");
+                               fractional ? "%.6g" : "%.1f");
+            item_tooltip("输入窗宽，回车或失焦后生效；不能小于最小窗宽");
             if (ImGui::IsItemDeactivatedAfterEdit())
             {
+                const double min_modal =
+                    scale.width_to_modality(meta.is_float ? state->width_min : 1.0);
                 state->window_setting.width =
-                    std::max(width_input, meta.is_float ? state->width_min : 1.0);
+                    scale.width_to_storage(std::max(width_input, min_modal));
                 state->roi_windowed = false;
                 apply_window(state);
             }
@@ -1849,10 +1871,31 @@ namespace
         ImGui::Text("缩放 %d%%", static_cast<int>(state->viewport.scale * 100.0));
         if (state->hover_valid)
         {
+            const voilut::ValueScale &scale = state->image->scale;
             const double ratio = voilut::display_ratio(state->hover_value, state->window_setting,
                                                        state->invert, state->voi_mode);
-            ImGui::Text("像素 (%d, %d) = %.6g → 显示 %d", state->hover_x, state->hover_y,
-                        state->hover_value, static_cast<int>(std::lround(ratio * 255.0)));
+            const bool has_modality = !state->image->modality_unit.empty() ||
+                                      scale.slope != 1.0 || scale.intercept != 0.0;
+            if (state->image->meta.is_float)
+            {
+                ImGui::Text("像素 (%d, %d) = %.6g → 显示 %d", state->hover_x, state->hover_y,
+                            state->hover_value, static_cast<int>(std::lround(ratio * 255.0)));
+            }
+            else if (has_modality)
+            {
+                const char *label =
+                    state->image->modality_unit.empty() ? "模态值"
+                                                        : state->image->modality_unit.c_str();
+                ImGui::Text("像素 (%d, %d) = %.0f（%s %.0f）→ 显示 %d", state->hover_x,
+                            state->hover_y, state->hover_value, label,
+                            scale.to_modality(state->hover_value),
+                            static_cast<int>(std::lround(ratio * 255.0)));
+            }
+            else
+            {
+                ImGui::Text("像素 (%d, %d) = %.0f → 显示 %d", state->hover_x, state->hover_y,
+                            state->hover_value, static_cast<int>(std::lround(ratio * 255.0)));
+            }
         }
         else
         {
@@ -1931,7 +1974,11 @@ namespace
             }
             ImGui::TextDisabled("原图 ROI (%.0f, %.0f)  %.0f × %.0f", record.rect.x,
                                 record.rect.y, record.rect.width, record.rect.height);
-            ImGui::TextDisabled("窗位 %.6g  窗宽 %.6g", record.window.level, record.window.width);
+            const double level = record.scale.to_modality(record.window.level);
+            const double width = record.scale.width_to_modality(record.window.width);
+            ImGui::TextDisabled("窗位 %.6g  窗宽 %.6g%s%s", level, width,
+                                record.modality_unit.empty() ? "" : " ",
+                                record.modality_unit.c_str());
             ImGui::PopID();
             ImGui::Separator();
         }
@@ -1958,12 +2005,18 @@ namespace
         }
 
         // 左上角窗值（跟随窗口而非面板，全屏查看时也能看到）。
-        const std::string text =
-            state->image->meta.is_float
-                ? std::format("L {:.6g}   W {:.6g}", state->window_setting.level,
-                              state->window_setting.width)
-                : std::format("L {:.0f}   W {:.0f}", state->window_setting.level,
-                              state->window_setting.width);
+        const voilut::ValueScale &scale = state->image->scale;
+        const double level = scale.to_modality(state->window_setting.level);
+        const double width = scale.width_to_modality(state->window_setting.width);
+        const bool fractional =
+            state->image->meta.is_float || std::abs(scale.slope) != 1.0;
+        std::string text = fractional
+                               ? std::format("L {:.6g}   W {:.6g}", level, width)
+                               : std::format("L {:.0f}   W {:.0f}", level, width);
+        if (!state->image->modality_unit.empty())
+        {
+            text += " " + state->image->modality_unit;
+        }
         const ImVec2 pos(ui_px(state, kPanelMargin + kPanelWidth + 16.0f),
                          ImGui::GetFrameHeight() + ui_px(state, 8.0f));
         for (int dx = -1; dx <= 1; ++dx)

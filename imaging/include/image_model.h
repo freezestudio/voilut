@@ -62,6 +62,51 @@ namespace voilut
         }
     };
 
+    /// @brief 存储域 ↔ 模态值（如 CT 的 HU）换算。
+    /// @details 存储域是内部 uint16 像素：无符号原样，有符号加 `storage_offset`（32768）。
+    ///          模态值 = `(storage - storage_offset) * slope + intercept`。
+    struct ValueScale
+    {
+        double slope = 1.0;          ///< RescaleSlope（默认 1）。
+        double intercept = 0.0;      ///< RescaleIntercept（默认 0）。
+        double storage_offset = 0.0; ///< 有符号像素的内部偏移（32768 或 0）。
+        bool is_float = false;       ///< 浮点图像直接使用存储值。
+
+        /// @brief 存储值 → 模态值。
+        [[nodiscard]] double to_modality(double storage) const noexcept
+        {
+            return is_float ? storage : (storage - storage_offset) * slope + intercept;
+        }
+
+        /// @brief 模态值 → 存储值。
+        [[nodiscard]] double to_storage(double modality) const noexcept
+        {
+            if (is_float)
+            {
+                return modality;
+            }
+            const double safe_slope = slope != 0.0 ? slope : 1.0;
+            return (modality - intercept) / safe_slope + storage_offset;
+        }
+
+        /// @brief 窗宽（存储域）→ 模态域窗宽（按 |slope| 缩放）。
+        [[nodiscard]] double width_to_modality(double storage_width) const noexcept
+        {
+            return is_float ? storage_width : storage_width * std::abs(slope);
+        }
+
+        /// @brief 模态域窗宽 → 存储域窗宽。
+        [[nodiscard]] double width_to_storage(double modality_width) const noexcept
+        {
+            if (is_float)
+            {
+                return modality_width;
+            }
+            const double safe_slope = std::max(std::abs(slope), 1e-12);
+            return modality_width / safe_slope;
+        }
+    };
+
     /// @brief 解码完成的图像。
     struct DecodedImage
     {
@@ -85,6 +130,10 @@ namespace voilut
         std::vector<WindowSetting> window_presets;
         /// 需要从统计 / 直方图 / ROI 中排除的像素值（DICOM PixelPaddingValue）。
         ValueExclusion padding;
+        /// 存储域 ↔ 模态值换算（DICOM Rescale Slope/Intercept）。
+        ValueScale scale;
+        /// 模态值单位（DICOM RescaleType，如 "HU"；无则为空）。
+        std::string modality_unit;
         bool initial_invert = false;                   ///< 初始是否反色（MONOCHROME1）。
 
         /// @brief 取指定帧的 16 位像素视图（越界返回空 span）。

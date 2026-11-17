@@ -205,6 +205,21 @@ int main()
     check(padded_roi.has_value(), "ROI 窗在排除填充值后仍有效");
     check(padded_roi.has_value() && padded_roi->level >= 108.0, "ROI 窗不被填充值拉低");
 
+    // ---------------- 8) 存储域 ↔ 模态值（DICOM Rescale） ----------------
+    std::printf("8) 模态值换算\n");
+    const ValueScale ct_scale{.slope = 1.0, .intercept = -1024.0, .storage_offset = 32768.0};
+    check(near(ct_scale.to_modality(32768.0), -1024.0), "HU：存储偏移后得到 -1024");
+    check(near(ct_scale.to_storage(40.0), 33832.0), "HU：40 → 33832（存储域）");
+    check(near(ct_scale.width_to_modality(400.0), 400.0), "HU：窗宽换算（slope=1）");
+    const ValueScale slope_scale{.slope = 0.5, .intercept = -100.0, .storage_offset = 0.0};
+    check(near(slope_scale.to_modality(1000.0), 400.0), "slope=0.5：存储 1000 → 400");
+    check(near(slope_scale.to_storage(400.0), 1000.0), "slope=0.5：400 → 1000");
+    check(near(slope_scale.width_to_modality(200.0), 100.0), "slope=0.5：窗宽换算");
+    check(near(slope_scale.width_to_storage(100.0), 200.0), "slope=0.5：窗宽反算");
+    const ValueScale negative_scale{.slope = -2.0, .intercept = 0.0, .storage_offset = 0.0};
+    check(near(negative_scale.to_modality(10.0), -20.0), "负 slope：模态值取反");
+    check(near(negative_scale.width_to_modality(5.0), 10.0), "负 slope：窗宽用绝对值");
+
     std::printf("\n%s（失败 %d 项）\n", g_failures == 0 ? "全部通过" : "存在失败", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

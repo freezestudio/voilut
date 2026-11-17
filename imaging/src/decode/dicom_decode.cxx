@@ -324,6 +324,18 @@ namespace voilut
             result.default_window = default_window;
             result.window_presets = std::move(window_presets);
             result.padding = padding;
+            result.scale = ValueScale{
+                .slope = slope,
+                .intercept = intercept,
+                .storage_offset = offset,
+                .is_float = false,
+            };
+            result.modality_unit = read_string(dataset, gdcm::Tag(0x0028, 0x1054));
+            if (result.modality_unit.empty() &&
+                read_string(dataset, gdcm::Tag(0x0008, 0x0060)) == "CT")
+            {
+                result.modality_unit = "HU";
+            }
             result.initial_invert = monochrome1;
             return result;
         }
