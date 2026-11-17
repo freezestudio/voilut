@@ -14,8 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "detail_cache.h"
 #include "image_model.h"
-#include "image_renderer.h"
 #include "orientation.h"
 #include "region_source.h"
 #include "viewport.h"
@@ -47,16 +47,6 @@ namespace voilut::app
     {
         voilut::DecodedImage image;
         std::shared_ptr<voilut::RegionSource> source;
-    };
-
-    /// @brief 一个已缓存的细节区域（纹理数组层）。
-    struct DetailCacheEntry
-    {
-        voilut::Rect rect;
-        int32_t layer = -1;
-        uint32_t frame = 0;
-        uint64_t last_used = 0;
-        bool valid = false;
     };
 
     /// @brief 应用整体状态（回调通过 GLFW 的 user pointer 获取它）。
@@ -156,7 +146,7 @@ namespace voilut::app
         uint32_t detail_request_frame = 0;
         voilut::Rect detail_loaded{};
         uint32_t detail_loaded_frame = 0;
-        std::array<DetailCacheEntry, voilut::ImageRenderer::kDetailLayerCount> detail_cache{};
+        DetailCache detail_cache;
         uint64_t detail_clock = 0;
         voilut::Viewport detail_last_viewport{};
         voilut::Orientation detail_last_orientation{};

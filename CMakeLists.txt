@@ -493,6 +493,11 @@ if(BUILD_TESTING)
   target_compile_options(region_source_test PRIVATE ${PROJECT_WARNINGS})
   target_link_libraries(region_source_test PRIVATE voilut_model ${TIFF_LINK_LIBRARIES})
   add_test(NAME region_source_test COMMAND region_source_test)
+
+  add_executable(detail_cache_test tests/detail_cache_test.cxx)
+  target_include_directories(detail_cache_test PRIVATE apps imaging/include)
+  target_compile_options(detail_cache_test PRIVATE ${PROJECT_WARNINGS})
+  add_test(NAME detail_cache_test COMMAND detail_cache_test)
 endif()
 
 # ------------------------------------------------------------

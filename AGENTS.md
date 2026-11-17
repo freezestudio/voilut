@@ -38,7 +38,8 @@
 - `apps/`：可执行入口。UI 只调库，不重复实现映射逻辑。已按职责拆分：
   `app_state.h`（共享状态）、`app_ops.cxx`（窗值/视口/ROI/帧）、
   `image_io.cxx`（播放列表与异步解码）、`input.cxx`（GLFW 回调）、
-  `ui.cxx`（菜单/面板/直方图/叠层）、`windower.cxx`（入口与主循环）。
+  `ui.cxx`（菜单/面板/直方图/叠层）、`detail_cache.h`（细节 LRU 策略）、
+  `windower.cxx`（入口与主循环）。
   新增交互时优先放进对应文件，不要重新堆回 `windower.cxx`。
 - `shaders/`：WGSL。**映射公式改动必须同时改 CPU 侧**（`display_ratio`），
   并保持注释里互相引用的说法一致。
@@ -131,6 +132,8 @@
   把有效矩形/层号写进 uniform，shader 按 `source_size` 判断并采样。
   按需渲染下 detail_dirty 时主循环必须用 `glfwWaitEventsTimeout`（否则阻塞在
   WaitEvents，防抖到期后不再触发）。
+  缓存策略在 `apps/detail_cache.h`（不依赖 GPU），由 `detail_cache_test` 覆盖
+  选层/覆盖判断/按帧收集/LRU；改策略时先补测试再接 `update_detail`。
 - 大图预览路径：`DecodedImage.meta.width/height` 是**原图逻辑尺寸**，
   `preview_width/height` 是纹理尺寸（0 表示两者相同）；像素索引用
   `texture_width()/texture_height()`，不要用 `meta.width` 索引 `pixels`。

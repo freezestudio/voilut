@@ -375,7 +375,7 @@ namespace voilut::app
         state->detail_loaded = {};
         state->detail_loaded_frame = 0;
         state->detail_request = {};
-        state->detail_cache = {};
+        state->detail_cache.clear();
         state->detail_clock = 0;
         state->renderer->clear_detail();
 
@@ -581,72 +581,28 @@ namespace voilut::app
         /// @brief 把当前缓存中的有效层写进渲染器 uniform。
         void sync_detail_entries(AppState *state)
         {
-            std::array<voilut::DetailLayer, voilut::ImageRenderer::kDetailLayerCount> entries{};
+            std::array<DetailCacheEntry, DetailCache::kCapacity> cached{};
             size_t count = 0;
             const bool active = state->image != nullptr && state->region_source != nullptr &&
                                 state->detail_enabled && !state->loading &&
                                 state->viewport.scale >= 0.75;
             if (active)
             {
-                for (const DetailCacheEntry &entry : state->detail_cache)
-                {
-                    if (!entry.valid || entry.layer < 0 || entry.frame != state->frame_index)
-                    {
-                        continue;
-                    }
-                    entries[count++] = voilut::DetailLayer{
-                        .x = static_cast<uint32_t>(entry.rect.x),
-                        .y = static_cast<uint32_t>(entry.rect.y),
-                        .width = static_cast<uint32_t>(entry.rect.width),
-                        .height = static_cast<uint32_t>(entry.rect.height),
-                        .layer = entry.layer,
-                    };
-                }
+                count = state->detail_cache.collect(state->frame_index, cached);
+            }
+            std::array<voilut::DetailLayer, DetailCache::kCapacity> entries{};
+            for (size_t i = 0; i < count; ++i)
+            {
+                entries[i] = voilut::DetailLayer{
+                    .x = static_cast<uint32_t>(cached[i].rect.x),
+                    .y = static_cast<uint32_t>(cached[i].rect.y),
+                    .width = static_cast<uint32_t>(cached[i].rect.width),
+                    .height = static_cast<uint32_t>(cached[i].rect.height),
+                    .layer = cached[i].layer,
+                };
             }
             state->renderer->set_detail_entries(
                 std::span<const voilut::DetailLayer>(entries.data(), count));
-        }
-
-        /// @brief 选一个细节层：优先空层，否则 LRU。
-        int32_t pick_detail_layer(const AppState *state)
-        {
-            int32_t free_layer = -1;
-            int32_t lru_layer = 0;
-            uint64_t oldest = UINT64_MAX;
-            for (size_t i = 0; i < state->detail_cache.size(); ++i)
-            {
-                const DetailCacheEntry &entry = state->detail_cache[i];
-                if (!entry.valid)
-                {
-                    free_layer = static_cast<int32_t>(i);
-                    break;
-                }
-                if (entry.last_used < oldest)
-                {
-                    oldest = entry.last_used;
-                    lru_layer = static_cast<int32_t>(i);
-                }
-            }
-            return free_layer >= 0 ? free_layer : lru_layer;
-        }
-
-        /// @brief 缓存中是否有层完整覆盖可见区域。
-        bool cache_covers(const AppState *state, double x0, double y0, double x1, double y1)
-        {
-            for (const DetailCacheEntry &entry : state->detail_cache)
-            {
-                if (!entry.valid || entry.layer < 0 || entry.frame != state->frame_index)
-                {
-                    continue;
-                }
-                if (entry.rect.x <= x0 + 0.5 && entry.rect.y <= y0 + 0.5 &&
-                    entry.rect.x + entry.rect.width >= x1 - 0.5 &&
-                    entry.rect.y + entry.rect.height >= y1 - 0.5)
-                {
-                    return true;
-                }
-            }
-            return false;
         }
     } // namespace
 
@@ -671,7 +627,7 @@ namespace voilut::app
                 state->renderer != nullptr)
             {
                 const voilut::PixelRegion &region = *result;
-                const int32_t layer = pick_detail_layer(state);
+                const int32_t layer = state->detail_cache.pick_layer();
                 const bool is_float =
                     state->image->pixel_type == voilut::DecodedImage::PixelType::Float32;
                 const auto uploaded =
@@ -689,20 +645,16 @@ namespace voilut::app
                         std::println("细节纹理已启用：{}×{}（层 {}）", region.width, region.height,
                                      layer);
                     }
-                    DetailCacheEntry &entry =
-                        state->detail_cache[static_cast<size_t>(layer)];
-                    entry.rect = {
+                    const voilut::Rect rect{
                         .x = static_cast<double>(region.x),
                         .y = static_cast<double>(region.y),
                         .width = static_cast<double>(region.width),
                         .height = static_cast<double>(region.height),
                     };
-                    entry.layer = layer;
-                    entry.frame = state->frame_index;
-                    entry.last_used = ++state->detail_clock;
-                    entry.valid = true;
-                    state->detail_loaded = entry.rect;
-                    state->detail_loaded_frame = entry.frame;
+                    state->detail_cache.store(layer, rect, state->frame_index,
+                                              ++state->detail_clock);
+                    state->detail_loaded = rect;
+                    state->detail_loaded_frame = state->frame_index;
                     sync_detail_entries(state);
                 }
                 else
@@ -794,18 +746,10 @@ namespace voilut::app
             return;
         }
 
-        if (cache_covers(state, min_x, min_y, max_x, max_y))
+        if (state->detail_cache.covers(min_x, min_y, max_x, max_y, state->frame_index))
         {
-            for (DetailCacheEntry &entry : state->detail_cache)
-            {
-                if (entry.valid && entry.frame == state->frame_index && entry.layer >= 0 &&
-                    entry.rect.x <= min_x + 0.5 && entry.rect.y <= min_y + 0.5 &&
-                    entry.rect.x + entry.rect.width >= max_x - 0.5 &&
-                    entry.rect.y + entry.rect.height >= max_y - 0.5)
-                {
-                    entry.last_used = ++state->detail_clock;
-                }
-            }
+            state->detail_cache.touch_covering(min_x, min_y, max_x, max_y,
+                                               state->frame_index, ++state->detail_clock);
             state->detail_dirty = false;
             sync_detail_entries(state);
             return;
