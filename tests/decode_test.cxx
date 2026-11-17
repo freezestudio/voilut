@@ -40,8 +40,7 @@ namespace
     TIFF *open_writer(const std::filesystem::path &path, bool little_endian)
     {
 #if defined(_WIN32)
-        const std::wstring mode = little_endian ? L"wl" : L"wb";
-        return TIFFOpenW(path.c_str(), mode.c_str());
+        return TIFFOpenW(path.c_str(), little_endian ? "wl" : "wb");
 #else
         return TIFFOpen(to_utf8(path).c_str(), little_endian ? "wl" : "wb");
 #endif
