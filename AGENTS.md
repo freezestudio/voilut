@@ -107,7 +107,7 @@
 - TIFF：tiled、多页（逐页解码并校验尺寸）、大端字节交换、`PHOTOMETRIC_MINISWHITE`；
   多页 / 多帧受 `kMaxDecodeBytes` 限制（超出时只加载前 N 帧并告警）。
   多帧 DICOM 必须按 `GetBufferLength()` 全量分配（再逐帧转换），
-  按单帧分配会堆溢出。浮点 TIFF 明确拒绝。
+  按单帧分配会堆溢出。
 - 帧导航：`DecodedImage::frame_pixels(index)` / `frame_floats(index)` 是唯一取帧入口；
   切换帧只重传纹理并重算该帧统计/直方图，窗值保持不变（z-stack 对比）。
   不要把 `image->pixels` / `float_pixels` 当单帧传给 `compute_histogram` /
@@ -115,6 +115,9 @@
 - 浮点 TIFF：`pixel_type = Float32`、数据在 `float_pixels`、`meta.is_float = true`。
   渲染用 `R32Uint` 纹理存 float 位模式，`WindowParams.value_type = 1`，WGSL 用
   `bitcast<f32>` 读取；mipmap 必须在 float 域平均后再按位上传。
+- 解码在后台线程：`start_load` 启动 `std::async`，主循环每帧 `poll_load` 取结果，
+  只有主线程做 GPU 上传。不要在主线程直接调用 `decode_image`（启动首图也已异步）。
+  加载期间翻页会排队（`pending_index`），完成后自动加载。
   浮点窗宽下限按值域比例计算：`auto_window` / `preset_window` / `drag_window` /
   `apply_window` / 键盘步进都已分支，新加窗操作时要同步处理。
 

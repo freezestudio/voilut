@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +48,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -162,6 +164,13 @@ namespace
         bool error_pending = false;                             ///< 是否有待弹出的错误。
 
         bool quit_requested = false; ///< 退出请求（Esc / 关闭按钮）。
+
+        // 异步解码：避免大图加载时冻结 UI。
+        bool loading = false; ///< 是否正在后台解码。
+        std::future<std::expected<voilut::DecodedImage, std::string>> load_future; ///< 后台结果。
+        std::string load_path;                 ///< 正在加载的路径。
+        std::size_t pending_index = 0;         ///< 加载期间用户请求的下一张。
+        bool has_pending = false;              ///< 是否有待处理的翻页请求。
     };
 
     // ------------------------------------------------------------
@@ -675,7 +684,30 @@ namespace
         }
     }
 
-    /// @brief 解码并显示图像列表中的第 `index` 项。
+    /// @brief 启动后台解码（完成后通过 glfwPostEmptyEvent 唤醒主循环）。
+    /// @param state 应用状态（窗口指针用于唤醒）。
+    /// @param path 图像路径。
+    void start_load(AppState *state, const std::string &path)
+    {
+        state->load_path = path;
+        state->loading = true;
+        GLFWwindow *window = state->window;
+        state->load_future = std::async(std::launch::async, [path, window]() {
+            std::expected<voilut::DecodedImage, std::string> result =
+                std::unexpected(std::string("无法识别的图像格式：") + path);
+            if (const auto kind = voilut::kind_from_name(path))
+            {
+                result = voilut::decode_image(path, *kind);
+            }
+            if (window != nullptr)
+            {
+                glfwPostEmptyEvent(); // 唤醒主循环（GLFW 允许跨线程调用）
+            }
+            return result;
+        });
+    }
+
+    /// @brief 解码并显示图像列表中的第 `index` 项（后台解码，完成后在主循环应用）。
     void load_playlist_item(AppState *state, std::size_t index)
     {
         if (state->playlist.empty())
@@ -683,22 +715,45 @@ namespace
             return;
         }
         const std::size_t count = state->playlist.size();
-        state->playlist_index = index % count;
-        const std::string &path = state->playlist[state->playlist_index];
+        const std::size_t target = index % count;
+        if (state->loading)
+        {
+            // 加载中收到翻页请求：记下最后一次，当前解码结束后再加载。
+            state->pending_index = target;
+            state->has_pending = true;
+            return;
+        }
+        state->playlist_index = target;
+        start_load(state, state->playlist[target]);
+    }
 
-        const auto kind = voilut::kind_from_name(path);
-        if (!kind)
+    /// @brief 主循环每帧调用：把已完成的后台解码结果应用到 UI / GPU。
+    void poll_load(AppState *state)
+    {
+        if (!state->loading || !state->load_future.valid())
         {
-            report_error(state, std::format("无法识别的图像格式：{}", path));
             return;
         }
-        auto decoded = voilut::decode_image(path, *kind);
-        if (!decoded)
+        if (state->load_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
         {
-            report_error(state, std::format("解码失败：{}", decoded.error()));
             return;
         }
-        apply_image(state, std::move(decoded.value()), path);
+        auto result = state->load_future.get();
+        state->loading = false;
+        if (result)
+        {
+            apply_image(state, std::move(result.value()), state->load_path);
+        }
+        else
+        {
+            report_error(state, std::format("解码失败：{}", result.error()));
+        }
+        if (state->has_pending)
+        {
+            state->has_pending = false;
+            load_playlist_item(state, state->pending_index);
+        }
+        glfwPostEmptyEvent();
     }
 
     /// @brief 打开单个文件（以所在目录重建图像列表）。
@@ -1854,11 +1909,20 @@ namespace
     /// @brief 图像上的浮层：当前窗值 + ROI 框。
     void draw_overlay(AppState *state)
     {
+        ImDrawList *draw_list = ImGui::GetBackgroundDrawList();
+        if (state->loading)
+        {
+            const char *text = "正在加载…";
+            const ImVec2 size = ImGui::CalcTextSize(text);
+            const ImVec2 display = ImGui::GetIO().DisplaySize;
+            draw_list->AddText(ImVec2((display.x - size.x) * 0.5f,
+                                      ImGui::GetFrameHeight() + ui_px(state, 12.0f)),
+                               IM_COL32(255, 220, 120, 255), text);
+        }
         if (state->image == nullptr)
         {
             return;
         }
-        ImDrawList *draw_list = ImGui::GetBackgroundDrawList();
 
         // 左上角窗值（跟随窗口而非面板，全屏查看时也能看到）。
         const std::string text =
@@ -2018,19 +2082,6 @@ int main(int argc, char **argv)
     if (!playlist.empty())
     {
         initial_path = playlist.front();
-        const auto kind = voilut::kind_from_name(initial_path);
-        if (!kind)
-        {
-            std::println("无法识别的图像格式：{}", initial_path);
-            return EXIT_FAILURE;
-        }
-        auto decoded = voilut::decode_image(initial_path, *kind);
-        if (!decoded)
-        {
-            std::println("解码失败：{}", decoded.error());
-            return EXIT_FAILURE;
-        }
-        image = std::move(decoded.value());
     }
 
     if (!glfwInit())
@@ -2142,7 +2193,7 @@ int main(int argc, char **argv)
 
             if (!initial_path.empty())
             {
-                apply_image(&state, std::move(image), initial_path);
+                start_load(&state, initial_path);
             }
             else
             {
@@ -2169,6 +2220,7 @@ int main(int argc, char **argv)
 
                 ImGui_ImplWGPU_NewFrame();
                 ImGui_ImplGlfw_NewFrame();
+                poll_load(&state);
                 ImGui::NewFrame();
                 draw_menu_bar(&state);
                 update_hover(&state);
