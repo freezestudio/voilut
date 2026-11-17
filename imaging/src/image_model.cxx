@@ -9,26 +9,36 @@
 
 namespace voilut
 {
-    ImageStats compute_stats(std::span<const uint16_t> pixels)
+    ImageStats compute_stats(std::span<const uint16_t> pixels, ValueExclusion exclusion)
     {
         if (pixels.empty())
         {
             return {};
         }
 
-        // 16 位直方图：一次遍历同时得到 min/max 与分布
+        // 16 位直方图：一次遍历同时得到 min/max 与分布；填充值不参与统计。
         std::vector<uint32_t> histogram(65536, 0);
         uint32_t min_value = 65535;
         uint32_t max_value = 0;
+        size_t included = 0;
         for (const uint16_t value : pixels)
         {
+            if (exclusion.contains(value))
+            {
+                continue;
+            }
             ++histogram[value];
             min_value = std::min(min_value, static_cast<uint32_t>(value));
             max_value = std::max(max_value, static_cast<uint32_t>(value));
+            ++included;
+        }
+        if (included == 0)
+        {
+            return {};
         }
 
         // 1% 分位数：低端从 0 向上累计，高端从 65535 向下累计
-        const size_t rank = std::max<size_t>(1, pixels.size() / 100);
+        const size_t rank = std::max<size_t>(1, included / 100);
         uint32_t p1 = min_value;
         uint32_t p99 = max_value;
         bool p1_found = false;
@@ -78,7 +88,8 @@ namespace voilut
     }
 
     std::optional<WindowSetting> window_for_roi(std::span<const uint16_t> pixels, uint32_t width,
-                                                uint32_t height, const Rect &roi)
+                                                uint32_t height, const Rect &roi,
+                                                ValueExclusion exclusion)
     {
         const int64_t x0 = std::max<int64_t>(0, static_cast<int64_t>(std::floor(roi.x)));
         const int64_t y0 = std::max<int64_t>(0, static_cast<int64_t>(std::floor(roi.y)));
@@ -104,17 +115,27 @@ namespace voilut
         std::vector<uint32_t> hist(65536, 0);
         const int64_t step_w = (rw + stride - 1) / stride;
         const int64_t step_h = (rh + stride - 1) / stride;
+        int64_t included = 0;
         for (int64_t y = 0; y < step_h; ++y)
         {
             const int64_t row = (y0 + y * stride) * width + x0;
             for (int64_t x = 0; x < step_w; ++x)
             {
-                ++hist[pixels[static_cast<size_t>(row + x * stride)]];
+                const uint16_t value = pixels[static_cast<size_t>(row + x * stride)];
+                if (exclusion.contains(value))
+                {
+                    continue;
+                }
+                ++hist[value];
+                ++included;
             }
         }
+        if (included == 0)
+        {
+            return std::nullopt;
+        }
 
-        const int64_t n = step_w * step_h;
-        const int64_t rank = std::max<int64_t>(1, n / 100);
+        const int64_t rank = std::max<int64_t>(1, included / 100);
         uint32_t p1 = 0;
         uint32_t p99 = 65535;
         bool p1_found = false;
@@ -162,7 +183,8 @@ namespace voilut
         return pixels[static_cast<size_t>(iy) * width + static_cast<size_t>(ix)];
     }
 
-    Histogram compute_histogram(std::span<const uint16_t> pixels, double low, double high)
+    Histogram compute_histogram(std::span<const uint16_t> pixels, double low, double high,
+                                ValueExclusion exclusion)
     {
         Histogram hist{};
         if (pixels.empty() || !(high > low))
@@ -177,6 +199,10 @@ namespace voilut
         const double scale = static_cast<double>(kHistogramBins) / span;
         for (const uint16_t value : pixels)
         {
+            if (exclusion.contains(value))
+            {
+                continue;
+            }
             const double pos = (static_cast<double>(value) - low) * scale;
             const auto bin = static_cast<int64_t>(pos);
             if (bin < 0 || bin >= static_cast<int64_t>(kHistogramBins))

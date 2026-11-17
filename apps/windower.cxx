@@ -277,21 +277,22 @@ namespace
         return renderer.upload(image.meta.width, image.meta.height, image.frame_pixels(frame));
     }
 
-    /// @brief 统计指定帧（整数 / 浮点分派）。
-    voilut::ImageStats frame_stats(const voilut::DecodedImage &image, uint32_t frame)
+    /// @brief 统计指定帧（整数 / 浮点分派；整数会排除填充值）。
+    voilut::ImageStats frame_stats(const voilut::DecodedImage &image, uint32_t frame,
+                                   voilut::ValueExclusion exclusion)
     {
         return image.pixel_type == voilut::DecodedImage::PixelType::Float32
                    ? voilut::compute_stats_float(image.frame_floats(frame))
-                   : voilut::compute_stats(image.frame_pixels(frame));
+                   : voilut::compute_stats(image.frame_pixels(frame), exclusion);
     }
 
-    /// @brief 指定帧的 256 桶直方图（整数 / 浮点分派）。
+    /// @brief 指定帧的 256 桶直方图（整数 / 浮点分派；整数会排除填充值）。
     voilut::Histogram frame_histogram(const voilut::DecodedImage &image, uint32_t frame, double low,
-                                      double high)
+                                      double high, voilut::ValueExclusion exclusion)
     {
         return image.pixel_type == voilut::DecodedImage::PixelType::Float32
                    ? voilut::compute_histogram_float(image.frame_floats(frame), low, high)
-                   : voilut::compute_histogram(image.frame_pixels(frame), low, high);
+                   : voilut::compute_histogram(image.frame_pixels(frame), low, high, exclusion);
     }
 
     /// @brief 设置窗宽滑块范围与拖拽盘限（浮点按值域比例）。
@@ -490,7 +491,7 @@ namespace
                                  : voilut::window_for_roi(
                                        state->image->frame_pixels(state->frame_index),
                                        state->image->meta.width, state->image->meta.height,
-                                       state->roi_image);
+                                       state->roi_image, state->image->padding);
         if (!setting)
         {
             return false; // 选区太小，保持当前窗
@@ -587,7 +588,8 @@ namespace
 
         // 直方图：只在新图加载时计算一次（首帧，[min, max] 上的 256 桶）。
         state->histogram = frame_histogram(*state->image, 0, meta.min_value,
-                                           std::max(meta.max_value, meta.min_value + 1.0));
+                                           std::max(meta.max_value, meta.min_value + 1.0),
+                                           state->image->padding);
 
         // 窗值：优先恢复该图的上次窗值，否则 DICOM 默认窗 → p1/p99 自动窗。
         const auto it = state->remembered.find(path);
@@ -656,7 +658,7 @@ namespace
         state->frame_index = frame;
 
         // 帧统计用于直方图与滑块范围；窗值保持不变（z-stack / 时间序列对比时需要一致）。
-        const voilut::ImageStats stats = frame_stats(*state->image, frame);
+        const voilut::ImageStats stats = frame_stats(*state->image, frame, state->image->padding);
         voilut::ImageMeta &meta = state->image->meta;
         meta.min_value = stats.min_value;
         meta.max_value = stats.max_value;
@@ -667,7 +669,8 @@ namespace
         state->level_max = stats.max_value + stats.value_range * 0.05;
         set_width_limits(state, meta);
         state->histogram = frame_histogram(*state->image, frame, stats.min_value,
-                                           std::max(stats.max_value, stats.min_value + 1.0));
+                                           std::max(stats.max_value, stats.min_value + 1.0),
+                                           state->image->padding);
 
         apply_window(state);
         update_window_title(state);
@@ -1620,6 +1623,11 @@ namespace
                                 meta.max_value);
         }
         const char *value_format = meta.is_float ? "%.4g" : "%.0f";
+        if (state->image->padding.enabled)
+        {
+            ImGui::TextDisabled("已排除填充值 %.0f ~ %.0f（不参与统计 / 直方图 / ROI）",
+                                state->image->padding.low, state->image->padding.high);
+        }
         if (state->renderer->preview_scale() > 1)
         {
             ImGui::TextDisabled("预览：纹理降采样 1/%u（放大不会恢复原始像素）",
@@ -1741,6 +1749,27 @@ namespace
                 apply_window(state);
             }
             item_tooltip("使用文件自带的 WindowCenter / WindowWidth");
+        }
+
+        if (state->image->window_presets.size() > 1)
+        {
+            ImGui::Spacing();
+            ImGui::TextDisabled("DICOM 窗值（共 %zu 组）", state->image->window_presets.size());
+            for (std::size_t i = 0; i < state->image->window_presets.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    ImGui::SameLine();
+                }
+                const std::string label = std::format("DICOM {}", i + 1);
+                if (ImGui::Button(label.c_str()))
+                {
+                    state->window_setting = state->image->window_presets[i];
+                    state->roi_windowed = false;
+                    apply_window(state);
+                }
+                item_tooltip("使用文件自带的第 N 组 WindowCenter / WindowWidth");
+            }
         }
 
         ImGui::TextDisabled("预设（按值域比例）");

@@ -47,6 +47,21 @@ namespace voilut
         double height = 0.0;
     };
 
+    /// @brief 需要从统计 / 直方图 / ROI 中排除的像素值区间（如 DICOM 填充值）。
+    /// @details 闭区间；`enabled == false` 时不排除任何值。
+    struct ValueExclusion
+    {
+        bool enabled = false;
+        double low = 0.0;
+        double high = 0.0;
+
+        /// @brief 判断某个值是否应被排除。
+        [[nodiscard]] bool contains(double value) const noexcept
+        {
+            return enabled && value >= low && value <= high;
+        }
+    };
+
     /// @brief 解码完成的图像。
     struct DecodedImage
     {
@@ -66,6 +81,10 @@ namespace voilut
         /// 32 位浮点像素（`pixel_type == Float32` 时使用，同样连续存所有帧）。
         std::vector<float> float_pixels;
         std::optional<WindowSetting> default_window;   ///< 文件自带的默认窗（DICOM）。
+        /// DICOM 提供的多组 WindowCenter/WindowWidth（按 DICOM 顺序，已换算到像素域）。
+        std::vector<WindowSetting> window_presets;
+        /// 需要从统计 / 直方图 / ROI 中排除的像素值（DICOM PixelPaddingValue）。
+        ValueExclusion padding;
         bool initial_invert = false;                   ///< 初始是否反色（MONOCHROME1）。
 
         /// @brief 取指定帧的 16 位像素视图（越界返回空 span）。
@@ -107,8 +126,10 @@ namespace voilut
 
     /// @brief 统计 min/max 与 1% / 99% 分位数（直方图实现）。
     /// @param pixels 16 位像素。
-    /// @return 统计结果；空输入返回全 0。
-    [[nodiscard]] ImageStats compute_stats(std::span<const uint16_t> pixels);
+    /// @param exclusion 要排除的值区间（如填充值）。
+    /// @return 统计结果；空输入或全部被排除时返回全 0。
+    [[nodiscard]] ImageStats compute_stats(std::span<const uint16_t> pixels,
+                                           ValueExclusion exclusion = {});
 
     /// @brief 统计浮点像素的 min/max 与 p1/p99（量化为 65536 桶后取分位数）。
     /// @param pixels 浮点像素。
@@ -125,10 +146,12 @@ namespace voilut
     /// @param width 图像宽。
     /// @param height 图像高。
     /// @param roi ROI（图像坐标，越界部分裁剪）。
+    /// @param exclusion 要排除的值区间。
     /// @return ROI 无效（宽或高 < 4）时返回 `std::nullopt`。
     [[nodiscard]] std::optional<WindowSetting> window_for_roi(std::span<const uint16_t> pixels,
                                                               uint32_t width, uint32_t height,
-                                                              const Rect &roi);
+                                                              const Rect &roi,
+                                                              ValueExclusion exclusion = {});
 
     /// @brief 计算 ROI 内的 p1/p99 自动窗（浮点像素）。
     /// @param pixels 浮点像素。
@@ -182,9 +205,10 @@ namespace voilut
     /// @param pixels 16 位像素。
     /// @param low 区间下界（像素值，通常取 `meta.min_value`）。
     /// @param high 区间上界（像素值，通常取 `meta.max_value`）。
+    /// @param exclusion 要排除的值区间（不计入柱）。
     /// @return 直方图；区间非法或输入为空时返回全零。
     [[nodiscard]] Histogram compute_histogram(std::span<const uint16_t> pixels, double low,
-                                              double high);
+                                              double high, ValueExclusion exclusion = {});
 
     /// @brief 在 `[low, high]` 区间上统计浮点图像的 256 桶直方图。
     /// @param pixels 浮点像素。

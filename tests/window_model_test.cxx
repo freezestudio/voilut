@@ -182,6 +182,29 @@ int main()
     }
     check(float_sum == floats.size(), "浮点直方图计数完整");
 
+    // ---------------- 7) 填充值排除（DICOM PixelPaddingValue） ----------------
+    std::printf("7) 填充值排除\n");
+    std::vector<uint16_t> padded(16, 0); // 前 8 个为填充值 0
+    for (size_t i = 8; i < padded.size(); ++i)
+    {
+        padded[i] = static_cast<uint16_t>(100 + i);
+    }
+    const ValueExclusion exclude_padding{.enabled = true, .low = 0.0, .high = 0.0};
+    const ImageStats padded_stats = compute_stats(padded, exclude_padding);
+    check(padded_stats.min_value == 108.0, "统计排除填充值后的最小值");
+    check(padded_stats.max_value == 115.0, "统计排除填充值后的最大值");
+    const Histogram padded_hist = compute_histogram(padded, 0.0, 200.0, exclude_padding);
+    uint32_t padded_sum = 0;
+    for (const uint32_t count : padded_hist.bins)
+    {
+        padded_sum += count;
+    }
+    check(padded_sum == 8, "直方图排除填充值");
+    const auto padded_roi = window_for_roi(padded, 4, 4, Rect{0.0, 0.0, 4.0, 4.0},
+                                           exclude_padding);
+    check(padded_roi.has_value(), "ROI 窗在排除填充值后仍有效");
+    check(padded_roi.has_value() && padded_roi->level >= 108.0, "ROI 窗不被填充值拉低");
+
     std::printf("\n%s（失败 %d 项）\n", g_failures == 0 ? "全部通过" : "存在失败", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

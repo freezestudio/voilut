@@ -65,6 +65,66 @@ namespace voilut
             return value;
         }
 
+        /// @brief 读取多值 DS 标签（反斜杠分隔，如多个 WindowCenter / WindowWidth）。
+        std::vector<double> read_ds_list(const gdcm::DataSet &dataset, const gdcm::Tag &tag)
+        {
+            std::vector<double> values;
+            if (!dataset.FindDataElement(tag))
+            {
+                return values;
+            }
+            const gdcm::ByteValue *bytes = dataset.GetDataElement(tag).GetByteValue();
+            if (bytes == nullptr || bytes->GetLength() == 0)
+            {
+                return values;
+            }
+            const std::string text(bytes->GetPointer(), bytes->GetLength());
+            size_t start = 0;
+            while (start <= text.size())
+            {
+                const size_t end = text.find('\\', start);
+                std::string part =
+                    text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                while (!part.empty() &&
+                       (part.back() == ' ' || part.back() == '\0' || part.back() == '\r'))
+                {
+                    part.pop_back();
+                }
+                if (!part.empty())
+                {
+                    char *parse_end = nullptr;
+                    const double value = std::strtod(part.c_str(), &parse_end);
+                    if (parse_end != part.c_str())
+                    {
+                        values.push_back(value);
+                    }
+                }
+                if (end == std::string::npos)
+                {
+                    break;
+                }
+                start = end + 1;
+            }
+            return values;
+        }
+
+        /// @brief 读取 SS（有符号短整数）标签（小端）。缺失时返回 `std::nullopt`。
+        std::optional<int> read_ss(const gdcm::DataSet &dataset, const gdcm::Tag &tag)
+        {
+            if (!dataset.FindDataElement(tag))
+            {
+                return std::nullopt;
+            }
+            const gdcm::ByteValue *bytes = dataset.GetDataElement(tag).GetByteValue();
+            if (bytes == nullptr || bytes->GetLength() < 2)
+            {
+                return std::nullopt;
+            }
+            int16_t value = 0;
+            std::memcpy(&value, bytes->GetPointer(), sizeof(value));
+            return static_cast<int>(value);
+        }
+
         /// @brief 读取 US（无符号短整数）标签（小端）。缺失时返回 `std::nullopt`。
         std::optional<unsigned int> read_us(const gdcm::DataSet &dataset, const gdcm::Tag &tag)
         {
@@ -180,24 +240,72 @@ namespace voilut
                 }
             }
 
-            // Rescale / 默认窗（优先用 DICOM 自带的 WindowCenter / WindowWidth）
-            const double slope = read_ds(dataset, gdcm::Tag(0x0028, 0x1053)).value_or(1.0);
+            // Rescale / 多组 WindowCenter/WindowWidth / PixelPaddingValue。
+            const double slope_raw = read_ds(dataset, gdcm::Tag(0x0028, 0x1053)).value_or(1.0);
+            const double slope = slope_raw != 0.0 ? slope_raw : 1.0;
             const double intercept = read_ds(dataset, gdcm::Tag(0x0028, 0x1052)).value_or(0.0);
+            const double offset = is_signed ? kSignedOffset : 0.0;
 
-            std::optional<WindowSetting> default_window;
-            const auto window_center = read_ds(dataset, gdcm::Tag(0x0028, 0x1050));
-            const auto window_width = read_ds(dataset, gdcm::Tag(0x0028, 0x1051));
-            if (window_center && window_width && *window_width > 0.0)
+            // DICOM 允许 WindowCenter/WindowWidth 多值：全部换算成预设窗，第一个作为默认。
+            const auto centers = read_ds_list(dataset, gdcm::Tag(0x0028, 0x1050));
+            const auto widths = read_ds_list(dataset, gdcm::Tag(0x0028, 0x1051));
+            std::vector<WindowSetting> window_presets;
+            const size_t pairs = std::min(centers.size(), widths.size());
+            for (size_t i = 0; i < pairs; ++i)
             {
-                const double offset = is_signed ? kSignedOffset : 0.0;
-                default_window = WindowSetting{
-                    .level = (*window_center - intercept) / slope + offset,
-                    .width = std::max(*window_width / slope, 1.0),
-                };
+                if (widths[i] <= 0.0)
+                {
+                    continue;
+                }
+                window_presets.push_back(WindowSetting{
+                    .level = (centers[i] - intercept) / slope + offset,
+                    .width = std::max(widths[i] / slope, 1.0),
+                });
+            }
+            std::optional<WindowSetting> default_window;
+            if (!window_presets.empty())
+            {
+                default_window = window_presets.front();
+            }
+
+            // PixelPaddingValue / PixelPaddingRangeLimit：从统计、直方图、ROI 中排除。
+            ValueExclusion padding;
+            std::optional<double> padding_value;
+            if (is_signed)
+            {
+                if (const auto value = read_ss(dataset, gdcm::Tag(0x0028, 0x0120)))
+                {
+                    padding_value = static_cast<double>(*value) + offset;
+                }
+            }
+            else if (const auto value = read_us(dataset, gdcm::Tag(0x0028, 0x0120)))
+            {
+                padding_value = static_cast<double>(*value) + offset;
+            }
+            if (padding_value)
+            {
+                double low = *padding_value;
+                double high = *padding_value;
+                if (is_signed)
+                {
+                    if (const auto limit = read_ss(dataset, gdcm::Tag(0x0028, 0x0121)))
+                    {
+                        const double limit_value = static_cast<double>(*limit) + offset;
+                        low = std::min(low, limit_value);
+                        high = std::max(high, limit_value);
+                    }
+                }
+                else if (const auto limit = read_us(dataset, gdcm::Tag(0x0028, 0x0121)))
+                {
+                    const double limit_value = static_cast<double>(*limit) + offset;
+                    low = std::min(low, limit_value);
+                    high = std::max(high, limit_value);
+                }
+                padding = ValueExclusion{.enabled = true, .low = low, .high = high};
             }
 
             const ImageStats stats = compute_stats(
-                std::span<const uint16_t>(pixels.data(), count));
+                std::span<const uint16_t>(pixels.data(), count), padding);
             DecodedImage result;
             result.name = file_name_of(path);
             result.meta = {
@@ -214,6 +322,8 @@ namespace voilut
             };
             result.pixels = std::move(pixels);
             result.default_window = default_window;
+            result.window_presets = std::move(window_presets);
+            result.padding = padding;
             result.initial_invert = monochrome1;
             return result;
         }
